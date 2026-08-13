@@ -42,20 +42,37 @@ export function drawDecorationLayer(ctx: CanvasRenderingContext2D, layer: Decora
  * canvas regions that don't collide with the character or text bounding
  * boxes, or with each other (spec §10: "ไม่ทำให้ Decoration ชนกัน").
  */
+export interface DecorationOverrides {
+  /** Caps how many decorations get placed — used by Phase 2's pack variation
+   * engine to vary density per composition preset (e.g. MINIMAL -> 0,
+   * COMIC_BURST -> 4). Defaults to MAX_DECORATIONS when omitted. */
+  maxCount?: number;
+  /** Replaces the Style+Emotion derived glyph pool entirely — used by Phase
+   * 2 to pull from the richer per-emotion palette in
+   * config/composition-presets.ts instead of the single-sticker Style
+   * preset's small set. Defaults to the Style+Emotion pool when omitted. */
+  glyphPool?: string[];
+}
+
 export function generateDecorations(
   style: StyleId,
   emotion: EmotionId,
   canvasSize: CanvasSize,
-  avoidRects: Rect[]
+  avoidRects: Rect[],
+  overrides?: DecorationOverrides
 ): DecorationLayer[] {
   const preset = STYLE_PRESETS[style];
   const emotionGlyph = getEmotionPreset(emotion).emphasisGlyph;
-  const glyphPool = Array.from(new Set([...preset.decorationGlyphs, ...(emotionGlyph ? [emotionGlyph] : [])]));
+  const glyphPool =
+    overrides?.glyphPool && overrides.glyphPool.length > 0
+      ? overrides.glyphPool
+      : Array.from(new Set([...preset.decorationGlyphs, ...(emotionGlyph ? [emotionGlyph] : [])]));
+  const maxCount = overrides?.maxCount ?? MAX_DECORATIONS;
 
   const placed: DecorationLayer[] = [];
   const reserved = [...avoidRects];
 
-  for (let i = 0; i < CANDIDATE_SLOTS.length && placed.length < MAX_DECORATIONS; i++) {
+  for (let i = 0; i < CANDIDATE_SLOTS.length && placed.length < maxCount; i++) {
     const slot = CANDIDATE_SLOTS[i];
     const glyph = glyphPool[placed.length % glyphPool.length];
     const x = slot.fx * canvasSize.width;

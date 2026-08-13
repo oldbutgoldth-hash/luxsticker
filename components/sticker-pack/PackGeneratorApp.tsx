@@ -1,0 +1,365 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import type { PackPresetId, PackSize, PackStickerItem, StickerPack, StickerProject, StyleId } from "@/types";
+import UploadDropzone from "@/components/upload/UploadDropzone";
+import StylePicker from "@/components/panels/StylePicker";
+import PackSizePicker from "./PackSizePicker";
+import PackPresetPicker from "./PackPresetPicker";
+import StickerPlanEditor from "./StickerPlanEditor";
+import PackProgress from "./PackProgress";
+import PackSummaryBar from "./PackSummaryBar";
+import PackDashboardGrid from "./PackDashboardGrid";
+import PackStickerEditorModal from "./PackStickerEditorModal";
+import { removeBackgroundAndBuildLayer } from "@/engines/background-remover";
+import { buildCharacterMaster } from "@/lib/character-master";
+import { CANVAS_SIZE, nextId } from "@/lib/project-factory";
+import { buildStickerPlan } from "@/lib/plan-builder";
+import { generatePackStickers, regeneratePackSticker, saveEditedPackSticker, renderPackSticker, toPackStickerItem } from "@/lib/pack-pipeline";
+import { validateStickerPack } from "@/lib/pack-validation";
+import { savePackSnapshot, loadPackSnapshot, clearPackStorage } from "@/lib/pack-storage";
+import { exportPackAsZip } from "@/lib/pack-export";
+import { APP_VERSION } from "@/lib/app-version";
+
+type Step = "upload" | "size" | "preset" | "plan" | "generating" | "dashboard";
+
+function newPack(style: StyleId): StickerPack {
+  const now = new Date().toISOString();
+  return {
+    id: nextId("pack"),
+    name: "My Sticker Pack",
+    size: 16,
+    presetId: "daily",
+    style,
+    language: "th",
+    status: "DRAFT",
+    character: null,
+    plan: [],
+    stickers: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export default function PackGeneratorApp() {
+  const [step, setStep] = useState<Step>("upload");
+  const [pack, setPack] = useState<StickerPack | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState({ done: 0, total: 0, stage: "" });
+  const [selectedSticker, setSelectedSticker] = useState<PackStickerItem | null>(null);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Restore an in-progress pack on mount (spec §30/§31). Renders the normal
+  // "upload" step immediately rather than blocking on this — if a saved
+  // pack turns up a moment later, the view swaps to it then, so a fresh
+  // visitor never sees a blank screen while IndexedDB is checked.
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await loadPackSnapshot();
+        if (saved && saved.character) {
+          setPack(saved);
+          if (saved.stickers.length > 0) setStep("dashboard");
+          else if (saved.plan.length > 0) setStep("plan");
+          else setStep("size");
+        }
+      } catch (e) {
+        console.warn("[pack] restore failed:", e);
+      }
+    })();
+  }, []);
+
+  // Debounced autosave whenever the pack changes (skipped while a batch is running).
+  useEffect(() => {
+    if (!pack || isBusy) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      savePackSnapshot(pack).catch((e) => console.warn("[pack] autosave failed:", e));
+    }, 400);
+  }, [pack, isBusy]);
+
+  const summary = pack ? validateStickerPack(pack.stickers) : null;
+
+  const handleFileSelected = useCallback(async (file: File) => {
+    setError(null);
+    setIsBusy(true);
+    setBusyLabel("กำลังวิเคราะห์และตัดพื้นหลัง (ครั้งเดียวสำหรับทั้งแพ็ค)...");
+    try {
+      const outcome = await removeBackgroundAndBuildLayer(file, CANVAS_SIZE);
+      const master = await buildCharacterMaster(outcome.layer);
+      const p = newPack("cute");
+      p.character = master;
+      setPack(p);
+      setStep("size");
+    } catch (e) {
+      console.error(e);
+      setError("ไม่สามารถประมวลผลภาพได้ ลองใหม่อีกครั้ง");
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
+
+  const confirmSize = (size: PackSize, style: StyleId) => {
+    if (!pack) return;
+    setPack({ ...pack, size, style, updatedAt: new Date().toISOString() });
+    setStep("preset");
+  };
+
+  const confirmPreset = (presetId: PackPresetId) => {
+    if (!pack) return;
+    const plan = buildStickerPlan(pack.size, presetId);
+    setPack({ ...pack, presetId, plan, updatedAt: new Date().toISOString() });
+    setStep("plan");
+  };
+
+  const runGeneratePack = useCallback(async () => {
+    if (!pack?.character) return;
+    setError(null);
+    setIsBusy(true);
+    setStep("generating");
+    setProgress({ done: 0, total: pack.plan.length, stage: "Preparing" });
+    try {
+      const stickers = await generatePackStickers(pack.character, pack.plan, pack.style, (done, total, stage) =>
+        setProgress({ done, total, stage })
+      );
+      setPack((prev) => (prev ? { ...prev, stickers, status: "REVIEW", updatedAt: new Date().toISOString() } : prev));
+      setStep("dashboard");
+    } catch (e) {
+      console.error(e);
+      setError("สร้าง Sticker Pack ไม่สำเร็จ ลองใหม่อีกครั้ง");
+      setStep("plan");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [pack]);
+
+  const updateSticker = (updated: PackStickerItem) => {
+    setPack((prev) => (prev ? { ...prev, stickers: prev.stickers.map((s) => (s.id === updated.id ? updated : s)) } : prev));
+    setSelectedSticker(updated);
+  };
+
+  const handleEditorProjectChange = useCallback(
+    async (project: StickerProject) => {
+      if (!selectedSticker) return;
+      const optimistic = { ...selectedSticker, project };
+      setSelectedSticker(optimistic);
+      const saved = await saveEditedPackSticker(optimistic);
+      updateSticker(saved);
+    },
+    [selectedSticker]
+  );
+
+  const handleRegenerate = useCallback(async () => {
+    if (!pack?.character || !selectedSticker) return;
+    const planItem = pack.plan.find((p) => p.id === selectedSticker.planItemId);
+    if (!planItem) return;
+    setIsBusy(true);
+    try {
+      const updated = await regeneratePackSticker(pack.character, planItem, pack.style, selectedSticker);
+      updateSticker(updated);
+    } catch (e) {
+      console.error(e);
+      setError("Regenerate สติ๊กเกอร์นี้ไม่สำเร็จ");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [pack, selectedSticker]);
+
+  const handleDuplicate = useCallback(async () => {
+    if (!pack?.character || !selectedSticker) return;
+    const planItem = pack.plan.find((p) => p.id === selectedSticker.planItemId);
+    if (!planItem) return;
+    setIsBusy(true);
+    try {
+      const insertAt = pack.plan.findIndex((p) => p.id === planItem.id) + 1;
+      const clone = { ...planItem, id: nextId("plan"), order: insertAt + 1 };
+      const nextPlan = [...pack.plan];
+      nextPlan.splice(insertAt, 0, clone);
+      const renumbered = nextPlan.map((p, i) => ({ ...p, order: i + 1 }));
+
+      const outcome = await renderPackSticker(pack.character, clone, pack.style);
+      const newSticker = toPackStickerItem(clone, outcome);
+
+      setPack((prev) =>
+        prev ? { ...prev, plan: renumbered, stickers: [...prev.stickers, newSticker], updatedAt: new Date().toISOString() } : prev
+      );
+      setSelectedSticker(null);
+    } catch (e) {
+      console.error(e);
+      setError("Duplicate สติ๊กเกอร์ไม่สำเร็จ");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [pack, selectedSticker]);
+
+  const handleDelete = useCallback(() => {
+    if (!pack || !selectedSticker) return;
+    setPack((prev) =>
+      prev
+        ? {
+            ...prev,
+            plan: prev.plan.filter((p) => p.id !== selectedSticker.planItemId),
+            stickers: prev.stickers.filter((s) => s.id !== selectedSticker.id),
+            updatedAt: new Date().toISOString(),
+          }
+        : prev
+    );
+    setSelectedSticker(null);
+  }, [pack, selectedSticker]);
+
+  const handleExport = useCallback(async () => {
+    if (!pack) return;
+    setIsBusy(true);
+    setBusyLabel("กำลัง Export ZIP...");
+    setError(null);
+    try {
+      setPack((prev) => (prev ? { ...prev, status: "EXPORTING" } : prev));
+      const result = await exportPackAsZip(pack, APP_VERSION);
+      setPack((prev) => (prev ? { ...prev, status: "EXPORTED", updatedAt: new Date().toISOString() } : prev));
+      setBusyLabel(`Export สำเร็จ: ${result.filename}`);
+    } catch (e) {
+      console.error(e);
+      setError(e instanceof Error ? e.message : "Export ไม่สำเร็จ");
+      setPack((prev) => (prev ? { ...prev, status: "REVIEW" } : prev));
+    } finally {
+      setIsBusy(false);
+    }
+  }, [pack]);
+
+  const startOver = async () => {
+    await clearPackStorage().catch(() => {});
+    setPack(null);
+    setSelectedSticker(null);
+    setStep("upload");
+  };
+
+  return (
+    <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8">
+      <header className="text-center">
+        <h1 className="text-2xl font-extrabold tracking-tight text-slate-800">
+          LUXSTICKER <span className="text-pink-500">AI</span> — Sticker Pack
+        </h1>
+        <p className="text-sm text-slate-500">รูปเดียว → สติ๊กเกอร์ทั้งแพ็ค พร้อมข้อความ อารมณ์ และองค์ประกอบที่หลากหลาย</p>
+        <Link href="/" className="mt-2 inline-block text-xs font-semibold text-pink-500 hover:underline">
+          ← กลับไปสร้างสติ๊กเกอร์ทีละภาพ
+        </Link>
+      </header>
+
+      {error && <div className="rounded-xl bg-red-50 px-4 py-2 text-sm font-medium text-red-600">{error}</div>}
+
+      {pack?.character?.isFallbackCutout && (
+        <div className="rounded-2xl border-2 border-red-200 bg-red-50 p-4">
+          <p className="text-sm font-bold text-red-600">⚠️ BACKGROUND REMOVAL FAILED</p>
+          <p className="mt-1 text-xs text-red-500">
+            Character Master ยังมีพื้นหลังของภาพต้นฉบับติดอยู่ สติ๊กเกอร์ทุกภาพในแพ็คนี้จะไม่ผ่านการตรวจสอบ กรุณาเลือกรูปใหม่หรือเริ่มแพ็คใหม่
+          </p>
+          <button onClick={startOver} className="mt-2 rounded-xl bg-red-500 px-4 py-2 text-xs font-bold text-white hover:bg-red-600">
+            เลือกรูปใหม่
+          </button>
+        </div>
+      )}
+
+      {step === "upload" && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <UploadDropzone onFileSelected={handleFileSelected} disabled={isBusy} />
+        </section>
+      )}
+
+      {step === "size" && pack && (
+        <SizeStep pack={pack} onNext={confirmSize} />
+      )}
+
+      {step === "preset" && pack && (
+        <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <PackPresetPicker value={pack.presetId} onChange={(id) => setPack({ ...pack, presetId: id })} />
+          <button
+            onClick={() => confirmPreset(pack.presetId)}
+            className="w-full rounded-xl bg-pink-500 py-3 text-sm font-bold text-white hover:bg-pink-600"
+          >
+            ถัดไป: ตรวจรายการ Sticker Plan →
+          </button>
+        </section>
+      )}
+
+      {step === "plan" && pack && (
+        <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <StickerPlanEditor plan={pack.plan} onChange={(plan) => setPack({ ...pack, plan })} />
+          <button
+            onClick={runGeneratePack}
+            disabled={isBusy || pack.plan.length === 0}
+            className="w-full rounded-xl bg-pink-500 py-3 text-sm font-bold text-white hover:bg-pink-600 disabled:opacity-50"
+          >
+            ✨ Generate Pack ({pack.plan.length} stickers)
+          </button>
+        </section>
+      )}
+
+      {step === "generating" && <PackProgress done={progress.done} total={progress.total} stage={progress.stage} />}
+
+      {step === "dashboard" && pack && summary && (
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex gap-2">
+              <button onClick={() => setStep("plan")} className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                ← แก้ Plan
+              </button>
+              <button onClick={runGeneratePack} disabled={isBusy} className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                🔁 Generate ใหม่ทั้งแพ็ค
+              </button>
+              <button onClick={startOver} className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                + แพ็คใหม่
+              </button>
+            </div>
+            <button
+              onClick={handleExport}
+              disabled={isBusy || summary.readyCount !== summary.total || summary.total === 0}
+              className="rounded-xl bg-emerald-500 px-5 py-2 text-sm font-bold text-white hover:bg-emerald-600 disabled:opacity-40"
+              title={summary.readyCount !== summary.total ? "ทุกภาพต้องผ่านการตรวจสอบก่อน Export" : undefined}
+            >
+              ⬇ Export ZIP
+            </button>
+          </div>
+
+          <PackSummaryBar summary={summary} />
+          <PackDashboardGrid stickers={pack.stickers} onSelect={setSelectedSticker} />
+        </section>
+      )}
+
+      {selectedSticker && (
+        <PackStickerEditorModal
+          sticker={selectedSticker}
+          isBusy={isBusy}
+          onClose={() => setSelectedSticker(null)}
+          onProjectChange={handleEditorProjectChange}
+          onRegenerate={handleRegenerate}
+          onDuplicate={handleDuplicate}
+          onDelete={handleDelete}
+        />
+      )}
+
+      {isBusy && step !== "generating" && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="rounded-2xl bg-white px-6 py-4 text-sm font-semibold text-slate-700 shadow-lg">{busyLabel}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SizeStep({ pack, onNext }: { pack: StickerPack; onNext: (size: PackSize, style: StyleId) => void }) {
+  const [size, setSize] = useState<PackSize>(pack.size);
+  const [style, setStyle] = useState<StyleId>(pack.style);
+  return (
+    <section className="space-y-5 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <PackSizePicker value={size} onChange={setSize} />
+      <StylePicker value={style} onChange={setStyle} />
+      <button onClick={() => onNext(size, style)} className="w-full rounded-xl bg-pink-500 py-3 text-sm font-bold text-white hover:bg-pink-600">
+        ถัดไป: เลือก Preset →
+      </button>
+    </section>
+  );
+}

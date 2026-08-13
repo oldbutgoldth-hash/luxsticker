@@ -130,28 +130,109 @@ export interface ValidationResult {
 }
 
 // ----------------------------------------------------------------------------
-// Sticker Pack data model (spec Phase 1.1 §18) — prepared now so Phase 2's
-// batch generation (8/16/24/32/40-image packs) can be built on top without
-// reshaping anything here. Not wired into the UI yet; Phase 1.1 still only
-// ever produces a single Sticker.
+// Sticker Pack data model (Phase 2 — Sticker Pack Generator). Everything
+// below sits on TOP of the Phase 1 render pipeline: a PackStickerItem's
+// `project` is a completely normal StickerProject, rendered by the exact
+// same runGenerationPipeline/refreshAfterEdit used by the single-sticker
+// flow (lib/pipeline.ts, untouched). Nothing here changes how one sticker
+// gets rendered — it only orchestrates rendering many of them from one
+// shared CharacterMaster.
 // ----------------------------------------------------------------------------
 
-export interface Sticker {
+export type PackSize = 8 | 16 | 24 | 32 | 40;
+
+export const PACK_SIZES: PackSize[] = [8, 16, 24, 32, 40];
+
+/** Spec §29 — the pack's lifecycle state. */
+export type PackStatus =
+  | "DRAFT"
+  | "GENERATING"
+  | "REVIEW"
+  | "PARTIAL_READY"
+  | "READY"
+  | "EXPORTING"
+  | "EXPORTED"
+  | "ERROR";
+
+/** Spec §11 — named composition presets the variation engine picks between
+ * per sticker (chosen by emotion affinity, not randomly). */
+export type CompositionPresetId =
+  | "CENTER_TOP_TEXT"
+  | "CENTER_BOTTOM_TEXT"
+  | "LEFT_CHARACTER_RIGHT_TEXT"
+  | "RIGHT_CHARACTER_LEFT_TEXT"
+  | "BIG_CHARACTER_TOP_TEXT"
+  | "SMALL_CHARACTER_BIG_TEXT"
+  | "DIAGONAL"
+  | "COMIC_BURST"
+  | "HEART_FRAME"
+  | "MINIMAL";
+
+export type DecorationDensity = "none" | "low" | "normal" | "high";
+
+export type PackPresetId = "daily" | "love" | "funny" | "work" | "custom";
+
+/** One row in the editable Sticker Plan (spec §6/§7) — text + intent, not
+ * yet rendered. Rendering a plan item produces a PackStickerItem. */
+export interface StickerPlanItem {
   id: string;
-  /** References a StickerProject by id rather than embedding the whole
-   * project inline — keeps a pack of 40 stickers (Phase 2) lightweight and
-   * lets projects be looked up/edited independently (spec Phase 1.2 §18). */
-  projectId: string;
+  order: number;
+  text: string;
+  emotion: EmotionId;
+  /** Defaults to the pack's overall style; overridable per item. */
+  styleOverride?: StyleId;
+  compositionPresetId: CompositionPresetId;
+  decorationDensity: DecorationDensity;
+}
+
+export type PackStickerStatus = "pending" | "generating" | "ready" | "needs_fix" | "error";
+
+/** One rendered sticker inside a pack. `project` is a normal StickerProject —
+ * the exact same shape the single-sticker editor already knows how to
+ * display and edit (spec §20: "คลิก Sticker ใดก็ได้ เปิด Editor เดิม"). */
+export interface PackStickerItem {
+  id: string;
+  planItemId: string;
+  order: number;
   filename: string;
-  validation: ValidationResult | null;
+  project: StickerProject | null;
   finalCanvas: HTMLCanvasElement | null;
+  validation: ValidationResult | null;
+  status: PackStickerStatus;
+  /** Auto-fix/regenerate attempts so far — surfaced instead of retrying forever. */
+  attempts: number;
+}
+
+/** Spec §4/§5 — the single identity source every sticker in the pack is
+ * built from. `dominantColors` is real, programmatic pixel sampling of the
+ * cutout (spec §35: no fake AI) — not an AI-detected face/hair/clothing
+ * attribute set, which this project does not have in Phase 2. Character
+ * consistency instead comes from every sticker reusing this exact
+ * `cutoutUrl` — background removal only ever runs once per pack (spec §15). */
+export interface CharacterMaster {
+  id: string;
+  originalUrl: string;
+  cutoutUrl: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  isFallbackCutout: boolean;
+  dominantColors: string[];
+  createdAt: string;
 }
 
 export interface StickerPack {
   id: string;
   name: string;
-  stickers: Sticker[];
+  size: PackSize;
+  presetId: PackPresetId;
+  style: StyleId;
+  language: "th" | "en";
+  status: PackStatus;
+  character: CharacterMaster | null;
+  plan: StickerPlanItem[];
+  stickers: PackStickerItem[];
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface Rect {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import Link from "next/link";
 import type { EmotionId, StickerProject, StyleId, ValidationResult } from "@/types";
 import UploadDropzone from "@/components/upload/UploadDropzone";
 import StylePicker from "@/components/panels/StylePicker";
@@ -174,6 +175,9 @@ export default function StickerGeneratorApp() {
           LUXSTICKER <span className="text-pink-500">AI</span>
         </h1>
         <p className="text-sm text-slate-500">สร้างสติ๊กเกอร์จากรูปคนจริง ตัดพื้นหลัง จัดองค์ประกอบ พร้อมใช้กับ LINE Creators Market</p>
+        <Link href="/pack" className="mt-2 inline-block text-xs font-semibold text-pink-500 hover:underline">
+          ต้องการสติ๊กเกอร์ทั้งแพ็ค (8-40 ภาพ)? ไปที่ Sticker Pack Generator →
+        </Link>
       </header>
 
       {error && <div className="rounded-xl bg-red-50 px-4 py-2 text-sm font-medium text-red-600">{error}</div>}

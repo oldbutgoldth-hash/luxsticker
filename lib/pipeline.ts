@@ -2,7 +2,7 @@ import type { StickerProject, ValidationResult } from "@/types";
 import { loadImage } from "./image-loader";
 import { measurementContext, renderWorkingCanvas } from "./render";
 import { autoCompose } from "@/engines/composition-engine";
-import { generateDecorations } from "@/engines/decoration-engine";
+import { generateDecorations, type DecorationOverrides } from "@/engines/decoration-engine";
 import { normalizeForProfile } from "@/engines/export-normalizer";
 import { DEFAULT_EXPORT_PROFILE, type ExportProfile } from "@/config/export-profiles";
 import { expandRect } from "./canvas-utils";
@@ -25,7 +25,11 @@ export interface GenerationOutcome {
  */
 export async function runGenerationPipeline(
   project: StickerProject,
-  profile: ExportProfile = DEFAULT_EXPORT_PROFILE
+  profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
+  /** Phase 2 hook: lets the pack Variation Engine vary decoration density/
+   * glyphs per sticker. Omitted by every Phase 1 call site, so single-sticker
+   * behavior is byte-for-byte unchanged. */
+  decorationOverrides?: DecorationOverrides
 ): Promise<GenerationOutcome> {
   if (!project.character || !project.text) {
     throw new Error("ต้องมีทั้งภาพตัวละครและข้อความก่อนสร้างสติ๊กเกอร์");
@@ -36,10 +40,13 @@ export async function runGenerationPipeline(
 
   const composed = autoCompose(ctx, project.canvasSize, image, project.character, project.text);
 
-  const decorations = generateDecorations(project.style, project.emotion, project.canvasSize, [
-    expandRect(composed.characterRect, 14),
-    expandRect(composed.textRect, 14),
-  ]);
+  const decorations = generateDecorations(
+    project.style,
+    project.emotion,
+    project.canvasSize,
+    [expandRect(composed.characterRect, 14), expandRect(composed.textRect, 14)],
+    decorationOverrides
+  );
 
   const nextProject: StickerProject = {
     ...project,
