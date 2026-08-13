@@ -1,0 +1,53 @@
+LUXSTICKER AI
+Version: 1.2.0
+Build: 001
+Date: 2026-08-13 09:36 UTC
+Status: PASS
+
+Git Commit: N/A (no git repository initialized in this project)
+
+Build Result:
+  npm run lint  -> PASS (0 errors, 0 warnings)
+  tsc --noEmit  -> PASS (0 errors)
+  npm run build -> PASS (Next.js 16.3.0 / Turbopack, production build)
+  runtime smoke -> PASS (next start, HTTP 200, page renders)
+
+Test Result:
+  See TESTING.md inside this archive.
+  - Crop/scale geometry (cropAndFitToBounds + toEvenClamp): 5/5 scenarios
+    PASS (standalone Node verification — aspect ratio preserved, fits
+    370x320, even dimensions, >=10px padding in every case).
+  - Background leak detection (detectBackgroundLeak): 4/4 scenarios PASS
+    (standalone Node verification — corners, edges, and the "outside
+    content bounding box" region all correctly flagged).
+  - Full in-browser AI background-removal + editor interaction tests are
+    marked as needing manual verification (this sandbox cannot reach the
+    AI model CDN or run a headless browser) — see TESTING.md for the exact
+    breakdown of what was and wasn't exercised end-to-end.
+
+Main Changes (Phase 1.2 — Final Quality Gate + Build Versioning):
+  - lib/content-bounds.ts: new single-source-of-truth
+    getStickerContentBounds(), now used by crop-engine and
+    composition-engine instead of each computing its own alpha bounding
+    box.
+  - engines/validation-engine/background-leak.ts: new detectBackgroundLeak()
+    — checks all 4 corners, all 4 full edges, and every pixel outside the
+    content bounding box, not just "does some transparent pixel exist".
+  - engines/validation-engine: "dimensions" and "even-dimensions" split
+    into two separate checks (was one combined check); transparency check
+    now backed by detectBackgroundLeak().
+  - engines/export-normalizer: auto-fix set now includes
+    "even-dimensions"; fixed a latent bug where an over-budget "dimensions"
+    failure incorrectly triggered a padding increase instead of a shrink.
+  - types/index.ts: Sticker now references projectId instead of embedding
+    the full StickerProject (Phase 2 sticker-pack readiness).
+  - package.json version set to 1.2.0 (first versioned release under the
+    new ZIP-versioning rule).
+  - TESTING.md rewritten for the Phase 1.2 test case list.
+
+Kept unchanged (per "do not rebuild working architecture"):
+  - engines/background-remover, engines/outline-engine, engines/text-engine,
+    engines/decoration-engine, engines/composition-engine's composition
+    heuristics, engines/crop-engine's core algorithm, engines/export-engine's
+    normalize->validate->export->download flow, and the entire editor
+    (StickerCanvasEditor / EditorToolbar) — all untouched this phase.

@@ -1,5 +1,6 @@
 import type { Rect } from "@/types";
-import { alphaBoundingBox, createCanvas, get2dContext } from "@/lib/canvas-utils";
+import { createCanvas, get2dContext } from "@/lib/canvas-utils";
+import { getStickerContentBounds } from "@/lib/content-bounds";
 
 export interface CropOutcome {
   canvas: HTMLCanvasElement;
@@ -24,8 +25,7 @@ export function autoCropCanvas(
   paddingRatio = 0.06,
   minPaddingPx = 20
 ): CropOutcome {
-  const ctx = get2dContext(source);
-  const bbox = alphaBoundingBox(ctx, source.width, source.height, 8);
+  const bbox = getStickerContentBounds(source);
 
   if (!bbox) {
     return { canvas: source, cropRect: { x: 0, y: 0, width: source.width, height: source.height }, hadContent: false };
@@ -77,8 +77,7 @@ export interface ProfileCropOutcome {
  */
 export function cropAndFitToBounds(source: HTMLCanvasElement, options: ProfileCropOptions): ProfileCropOutcome {
   const { maxWidth, maxHeight, paddingPx, requireEvenDimensions } = options;
-  const ctx = get2dContext(source);
-  const bbox = alphaBoundingBox(ctx, source.width, source.height, 8);
+  const bbox = getStickerContentBounds(source);
 
   if (!bbox) {
     const w = requireEvenDimensions ? toEvenClamp(Math.min(2, maxWidth), maxWidth) : Math.min(2, maxWidth);

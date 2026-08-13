@@ -30,7 +30,7 @@ const FIX_PADDING_STEP_PX = 3;
  * removal failures and pre-crop clipping are deliberately excluded — spec
  * §9: "Background Removal Failed ไม่ควร Auto Fix แบบหลอกๆ ต้องให้ผู้ใช้
  * Generate ใหม่", and clipped content can't be recovered by re-cropping. */
-const AUTO_FIXABLE_CHECK_IDS = new Set(["dimensions", "padding", "file-size"]);
+const AUTO_FIXABLE_CHECK_IDS = new Set(["dimensions", "even-dimensions", "padding", "file-size"]);
 
 /**
  * normalizeForProfile (Phase 1.1 §6): Crop → Padding → Scale if necessary →
@@ -59,12 +59,16 @@ export async function normalizeForProfile(input: NormalizeInput): Promise<Normal
 
   let attempts = 0;
   while (!validation.passed && attempts < MAX_AUTO_FIX_ATTEMPTS) {
-    const failing = validation.checks.filter((c) => !c.passed && c.id !== "final-readiness");
+    const failing = validation.checks.filter((c) => !c.passed);
     const allFixable = failing.length > 0 && failing.every((c) => AUTO_FIXABLE_CHECK_IDS.has(c.id));
     if (!allFixable) break;
 
-    if (failing.some((c) => c.id === "file-size")) shrink *= FIX_SCALE_STEP;
-    if (failing.some((c) => c.id === "padding" || c.id === "dimensions")) paddingPx += FIX_PADDING_STEP_PX;
+    // Over-budget dimensions or an over-sized file both need a smaller
+    // canvas; insufficient padding or odd dimensions both need the crop
+    // recomputed with a nudged padding value (which also perturbs the
+    // rounding that produces even/odd output — §13 Auto Fix).
+    if (failing.some((c) => c.id === "file-size" || c.id === "dimensions")) shrink *= FIX_SCALE_STEP;
+    if (failing.some((c) => c.id === "padding" || c.id === "even-dimensions")) paddingPx += FIX_PADDING_STEP_PX;
     attempts++;
 
     finalCanvas = crop();

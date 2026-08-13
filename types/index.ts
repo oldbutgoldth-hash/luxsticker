@@ -138,10 +138,13 @@ export interface ValidationResult {
 
 export interface Sticker {
   id: string;
-  project: StickerProject;
-  finalCanvas: HTMLCanvasElement | null;
-  validation: ValidationResult | null;
+  /** References a StickerProject by id rather than embedding the whole
+   * project inline — keeps a pack of 40 stickers (Phase 2) lightweight and
+   * lets projects be looked up/edited independently (spec Phase 1.2 §18). */
+  projectId: string;
   filename: string;
+  validation: ValidationResult | null;
+  finalCanvas: HTMLCanvasElement | null;
 }
 
 export interface StickerPack {

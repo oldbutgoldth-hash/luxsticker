@@ -1,5 +1,6 @@
 import type { CanvasSize, CharacterLayer, Rect, TextLayer } from "@/types";
-import { createCanvas, get2dContext, alphaBoundingBox, expandRect, rectsIntersect } from "@/lib/canvas-utils";
+import { createCanvas, get2dContext, expandRect, rectsIntersect } from "@/lib/canvas-utils";
+import { getStickerContentBounds } from "@/lib/content-bounds";
 import { drawImageCentered } from "@/lib/layer-draw";
 import { getTextLayerRect, measureTextLayerLocal } from "@/engines/text-engine";
 
@@ -22,7 +23,7 @@ function computeCharacterRect(
   const canvas = createCanvas(canvasSize.width, canvasSize.height);
   const ctx = get2dContext(canvas);
   drawImageCentered(ctx, image, character.naturalWidth, character.naturalHeight, character);
-  const bbox = alphaBoundingBox(ctx, canvasSize.width, canvasSize.height);
+  const bbox = getStickerContentBounds(canvas);
   if (bbox) return bbox;
   // Fallback: nothing above the alpha threshold (e.g. fallback cutout with
   // no transparency) — approximate with the drawn image's own box.
