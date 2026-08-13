@@ -3,24 +3,30 @@ import { loadImage } from "./image-loader";
 import { measurementContext, renderWorkingCanvas } from "./render";
 import { autoCompose } from "@/engines/composition-engine";
 import { generateDecorations } from "@/engines/decoration-engine";
-import { autoCropCanvas } from "@/engines/crop-engine";
-import { validateSticker } from "@/engines/validation-engine";
+import { normalizeForProfile } from "@/engines/export-normalizer";
+import { DEFAULT_EXPORT_PROFILE, type ExportProfile } from "@/config/export-profiles";
 import { expandRect } from "./canvas-utils";
 
 export interface GenerationOutcome {
   project: StickerProject;
   finalCanvas: HTMLCanvasElement;
   validation: ValidationResult;
+  /** Threaded through so the Download button can re-validate later without
+   * re-deriving this from scratch (spec Phase 1.1 §12). */
+  workingCanvasClipped: boolean;
 }
 
 /**
- * Runs ADD TEXT → ADD DECORATION → AUTO COMPOSITION → AUTO CROP →
- * TRANSPARENT PNG → FINAL VALIDATION (spec workflow steps 6-11/15) in one
- * shot. Only called on "Generate" / "Regenerate" — never on every keystroke
- * or drag, per the §20 performance rule (those go straight through
- * renderWorkingCanvas instead, no engines re-run).
+ * Runs ADD TEXT → ADD DECORATION → AUTO COMPOSITION → AUTO CROP → LINE
+ * NORMALIZE → VALIDATION (spec Phase 1.1 workflow) in one shot. Only called
+ * on "Generate" / "Regenerate" — never on every keystroke or drag, per the
+ * §17 performance rule (those go through refreshAfterEdit / renderWorkingCanvas
+ * instead, no AI, no re-composition).
  */
-export async function runGenerationPipeline(project: StickerProject): Promise<GenerationOutcome> {
+export async function runGenerationPipeline(
+  project: StickerProject,
+  profile: ExportProfile = DEFAULT_EXPORT_PROFILE
+): Promise<GenerationOutcome> {
   if (!project.character || !project.text) {
     throw new Error("ต้องมีทั้งภาพตัวละครและข้อความก่อนสร้างสติ๊กเกอร์");
   }
@@ -43,27 +49,30 @@ export async function runGenerationPipeline(project: StickerProject): Promise<Ge
   };
 
   const working = await renderWorkingCanvas(nextProject);
-  const cropped = autoCropCanvas(working.canvas, 0.06, 20);
-
-  const validation = await validateSticker({
-    finalCanvas: cropped.canvas,
+  const { finalCanvas, validation } = await normalizeForProfile({
+    workingCanvas: working.canvas,
     workingCanvasClipped: working.clipped,
     isFallbackCutout: project.character.isFallbackCutout,
+    profile,
   });
 
-  return { project: nextProject, finalCanvas: cropped.canvas, validation };
+  return { project: nextProject, finalCanvas, validation, workingCanvasClipped: working.clipped };
 }
 
-/** Re-renders + re-crops + re-validates after a manual edit (move/resize/
- * rotate/delete/outline-width/text-edit) without touching AI or the
- * auto-composition heuristics — pure canvas work, fast and free. */
-export async function refreshAfterEdit(project: StickerProject): Promise<GenerationOutcome> {
+/** Re-renders + re-normalizes + re-validates after a manual edit
+ * (move/resize/rotate/delete/outline-width/text-edit) without touching AI
+ * or the auto-composition heuristics — pure canvas work, fast and free
+ * (spec Phase 1.1 §16/§17: editor + AI-avoidance must keep working). */
+export async function refreshAfterEdit(
+  project: StickerProject,
+  profile: ExportProfile = DEFAULT_EXPORT_PROFILE
+): Promise<GenerationOutcome> {
   const working = await renderWorkingCanvas(project);
-  const cropped = autoCropCanvas(working.canvas, 0.06, 20);
-  const validation = await validateSticker({
-    finalCanvas: cropped.canvas,
+  const { finalCanvas, validation } = await normalizeForProfile({
+    workingCanvas: working.canvas,
     workingCanvasClipped: working.clipped,
     isFallbackCutout: project.character?.isFallbackCutout ?? false,
+    profile,
   });
-  return { project, finalCanvas: cropped.canvas, validation };
+  return { project, finalCanvas, validation, workingCanvasClipped: working.clipped };
 }

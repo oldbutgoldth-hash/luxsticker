@@ -1,32 +1,34 @@
 import type { ValidationCheck, ValidationResult } from "@/types";
-import { get2dContext } from "@/lib/canvas-utils";
+import type { ExportProfile } from "@/config/export-profiles";
+import { alphaBoundingBox, get2dContext } from "@/lib/canvas-utils";
 
-const MIN_DIMENSION = 128;
-const MAX_DIMENSION = 4096;
-const MIN_FILE_SIZE_BYTES = 2 * 1024; // 2 KB — smaller almost certainly means a blank/broken export
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB — generous ceiling for a sticker PNG
+const PADDING_TOLERANCE_PX = 2; // float/rounding slack
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export interface ValidationInput {
   finalCanvas: HTMLCanvasElement;
-  /** True if the pre-crop working canvas had opaque pixels touching its
-   * outer edge (a sign content was clipped by the canvas bounds). */
+  /** True if opaque pixels touched the edge of the pre-crop working canvas —
+   * a sign something was genuinely clipped and can't be recovered. */
   workingCanvasClipped: boolean;
   /** True if the character cutout is the raw original photo because AI
-   * background removal failed (spec §19 fallback path). */
+   * background removal failed (spec §7 fallback path). */
   isFallbackCutout: boolean;
+  profile: ExportProfile;
 }
 
 /**
- * Final Validation (spec §15) — 7 checks, run right before Download.
- * Runs on the actual exported PNG bytes, not just in-memory canvas state,
- * so it genuinely reflects what the user is about to receive.
+ * Final Validation (Phase 1.1 §8) — 8 checks against a target export
+ * profile (LINE_STICKER by default), run on the actual normalized canvas
+ * right before Download so it genuinely reflects what the user is about to
+ * receive. No hardcoded 4096×4096 / 10MB generic thresholds anymore —
+ * everything comes from the profile.
  */
 export async function validateSticker(input: ValidationInput): Promise<ValidationResult> {
-  const { finalCanvas, workingCanvasClipped, isFallbackCutout } = input;
+  const { finalCanvas, workingCanvasClipped, isFallbackCutout, profile } = input;
   const checks: ValidationCheck[] = [];
-
-  // 1. Transparency present
   const ctx = get2dContext(finalCanvas);
+
+  // 01. Background transparency
   const { data } = ctx.getImageData(0, 0, finalCanvas.width, finalCanvas.height);
   let hasTransparentPixel = false;
   let hasOpaquePixel = false;
@@ -37,67 +39,101 @@ export async function validateSticker(input: ValidationInput): Promise<Validatio
   }
   checks.push({
     id: "transparency",
-    label: "พื้นหลังโปร่งใส",
+    label: "01 Background",
     passed: hasTransparentPixel,
-    message: hasTransparentPixel ? "ตรวจพบพื้นหลังโปร่งใสถูกต้อง" : "ไม่พบพื้นที่โปร่งใสในภาพ",
+    message: hasTransparentPixel ? "พื้นหลังโปร่งใส" : "พบพื้นหลังทึบ",
   });
 
-  // 2. Subject cut completely
+  // 02. Background removal must not be the raw-photo fallback
   checks.push({
-    id: "subject-cut",
-    label: "ตัดขอบบุคคลครบถ้วน",
+    id: "background-removal",
+    label: "02 Background Removal",
     passed: !isFallbackCutout,
-    message: isFallbackCutout
-      ? "ระบบตัดพื้นหลังอัตโนมัติไม่สำเร็จ ใช้ภาพต้นฉบับแทน — ผลลัพธ์อาจมีพื้นหลังติดมา"
-      : "ตัดพื้นหลังสำเร็จด้วยระบบ AI",
+    message: isFallbackCutout ? "การตัดพื้นหลังยังไม่สำเร็จ" : "ตัดพื้นหลังสำเร็จ",
   });
 
-  // 3 & 4. Nothing clipped by canvas edges before crop
+  // 03. Nothing was clipped before crop ever ran (unrecoverable if it was)
   checks.push({
-    id: "not-clipped",
-    label: "ข้อความ/องค์ประกอบไม่ถูกตัดขอบ",
+    id: "content-clipping",
+    label: "03 Content Clipping",
     passed: !workingCanvasClipped,
-    message: workingCanvasClipped
-      ? "มีองค์ประกอบบางส่วนชนขอบพื้นที่ทำงาน ระบบพยายามขยายพื้นที่ให้อัตโนมัติแล้ว"
-      : "องค์ประกอบทั้งหมดอยู่ในกรอบ ไม่มีส่วนใดถูกตัด",
+    message: workingCanvasClipped ? "พบองค์ประกอบชนขอบ" : "องค์ประกอบไม่ถูกตัด",
   });
 
-  // 5. Dimensions valid
-  const dimsOk =
-    finalCanvas.width >= MIN_DIMENSION &&
-    finalCanvas.height >= MIN_DIMENSION &&
-    finalCanvas.width <= MAX_DIMENSION &&
-    finalCanvas.height <= MAX_DIMENSION;
+  // 04. Dimensions: within profile bounds and (if required) even
+  const withinBounds = finalCanvas.width <= profile.maxWidth && finalCanvas.height <= profile.maxHeight;
+  const evenOk =
+    !profile.requireEvenDimensions || (finalCanvas.width % 2 === 0 && finalCanvas.height % 2 === 0);
+  const dimsOk = withinBounds && evenOk;
   checks.push({
     id: "dimensions",
-    label: "ขนาดภาพเหมาะสม",
+    label: "04 Dimensions",
     passed: dimsOk,
-    message: `${finalCanvas.width}×${finalCanvas.height}px`,
+    message: dimsOk
+      ? `${finalCanvas.width}×${finalCanvas.height}px (≤ ${profile.maxWidth}×${profile.maxHeight}, เลขคู่)`
+      : !withinBounds
+        ? `ขนาด ${finalCanvas.width}×${finalCanvas.height}px เกิน ${profile.maxWidth}×${profile.maxHeight}px`
+        : `ขนาด ${finalCanvas.width}×${finalCanvas.height}px ต้องเป็นเลขคู่`,
   });
 
-  // 6 & 7. Valid PNG + reasonable file size (checked on the real export blob)
-  const blob = await new Promise<Blob | null>((resolve) => finalCanvas.toBlob(resolve, "image/png"));
+  // 05. Padding: transparent margin around content, on the final canvas
+  const bbox = alphaBoundingBox(ctx, finalCanvas.width, finalCanvas.height, 8);
+  let paddingOk = false;
+  let minMargin = 0;
+  if (bbox) {
+    const left = bbox.x;
+    const top = bbox.y;
+    const right = finalCanvas.width - (bbox.x + bbox.width);
+    const bottom = finalCanvas.height - (bbox.y + bbox.height);
+    minMargin = Math.min(left, top, right, bottom);
+    paddingOk = minMargin >= profile.minPaddingPx - PADDING_TOLERANCE_PX;
+  }
+  checks.push({
+    id: "padding",
+    label: "05 Padding",
+    passed: paddingOk,
+    message: paddingOk
+      ? `มีพื้นที่ขอบรอบ Content เพียงพอ (~${Math.round(minMargin)}px)`
+      : `พื้นที่ขอบไม่พอ (~${Math.round(minMargin)}px ต้องการอย่างน้อย ${profile.minPaddingPx}px)`,
+  });
+
+  // 06 & 07: Valid PNG + file size, checked on the real export blob
+  const blob = await new Promise<Blob | null>((resolve) => finalCanvas.toBlob(resolve, profile.format === "png" ? "image/png" : undefined));
   const isPng = !!blob && blob.type === "image/png";
   let pngSignatureOk = false;
   if (blob) {
     const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
-    const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-    pngSignatureOk = PNG_SIG.every((b, i) => head[i] === b);
+    pngSignatureOk = PNG_SIGNATURE.every((b, i) => head[i] === b);
   }
   checks.push({
     id: "png-valid",
-    label: "ไฟล์ PNG ถูกต้อง",
+    label: "06 PNG",
     passed: isPng && pngSignatureOk,
-    message: isPng && pngSignatureOk ? "รูปแบบไฟล์ PNG ถูกต้อง" : "ไม่สามารถสร้างไฟล์ PNG ที่ถูกต้องได้",
+    message: isPng && pngSignatureOk ? "ไฟล์ PNG ถูกต้อง" : "ไฟล์ไม่ใช่ PNG ที่ถูกต้อง",
   });
 
-  const sizeOk = !!blob && blob.size >= MIN_FILE_SIZE_BYTES && blob.size <= MAX_FILE_SIZE_BYTES;
+  const sizeOk = !!blob && blob.size <= profile.maxFileSizeBytes;
   checks.push({
     id: "file-size",
-    label: "ขนาดไฟล์เหมาะสม",
+    label: "07 File Size",
     passed: sizeOk,
-    message: blob ? `${(blob.size / 1024).toFixed(0)} KB` : "ไม่สามารถคำนวณขนาดไฟล์ได้",
+    message: blob
+      ? `${(blob.size / 1024).toFixed(0)} KB${sizeOk ? "" : ` (เกิน ${Math.round(profile.maxFileSizeBytes / 1024)} KB)`}`
+      : "ไม่สามารถคำนวณขนาดไฟล์ได้",
   });
 
-  return { passed: checks.every((c) => c.passed), checks };
+  // 08. Final readiness — derived from every other check.
+  const readyForUse = checks.every((c) => c.passed);
+  checks.push({
+    id: "final-readiness",
+    label: "08 Final Readiness",
+    passed: readyForUse,
+    message: readyForUse ? "✓ READY TO USE" : "✗ NOT READY",
+  });
+
+  return {
+    passed: readyForUse,
+    checks,
+    meta: { width: finalCanvas.width, height: finalCanvas.height, fileSizeBytes: blob?.size ?? 0 },
+  };
 }

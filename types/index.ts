@@ -114,9 +114,41 @@ export interface ValidationCheck {
   autoFixed?: boolean;
 }
 
+export interface ValidationMeta {
+  width: number;
+  height: number;
+  fileSizeBytes: number;
+}
+
 export interface ValidationResult {
   passed: boolean;
   checks: ValidationCheck[];
+  /** Concrete numbers behind the checks (dimensions/file size of the PNG
+   * that was actually validated) — used by the export status UI so it
+   * doesn't have to re-derive them (spec Phase 1.1 §14/§15). */
+  meta?: ValidationMeta;
+}
+
+// ----------------------------------------------------------------------------
+// Sticker Pack data model (spec Phase 1.1 §18) — prepared now so Phase 2's
+// batch generation (8/16/24/32/40-image packs) can be built on top without
+// reshaping anything here. Not wired into the UI yet; Phase 1.1 still only
+// ever produces a single Sticker.
+// ----------------------------------------------------------------------------
+
+export interface Sticker {
+  id: string;
+  project: StickerProject;
+  finalCanvas: HTMLCanvasElement | null;
+  validation: ValidationResult | null;
+  filename: string;
+}
+
+export interface StickerPack {
+  id: string;
+  name: string;
+  stickers: Sticker[];
+  createdAt: string;
 }
 
 export interface Rect {

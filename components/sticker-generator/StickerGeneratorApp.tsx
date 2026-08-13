@@ -8,12 +8,12 @@ import EmotionPicker from "@/components/panels/EmotionPicker";
 import StickerCanvasEditor from "@/components/sticker-editor/StickerCanvasEditor";
 import EditorToolbar from "@/components/sticker-editor/EditorToolbar";
 import FinalPreviewCanvas from "@/components/sticker-editor/FinalPreviewCanvas";
-import ValidationChecklist from "@/components/sticker-generator/ValidationChecklist";
+import ExportStatusCard from "@/components/sticker-generator/ExportStatusCard";
 import { removeBackgroundAndBuildLayer } from "@/engines/background-remover";
 import { runGenerationPipeline, refreshAfterEdit } from "@/lib/pipeline";
 import { createInitialProject, CANVAS_SIZE } from "@/lib/project-factory";
-import { nextStickerFilename, exportCanvasAsPng } from "@/engines/export-engine";
-import { validateSticker } from "@/engines/validation-engine";
+import { nextStickerFilename, exportCanvasAsPng, ExportBlockedError } from "@/engines/export-engine";
+import { DEFAULT_EXPORT_PROFILE } from "@/config/export-profiles";
 
 type Phase = "upload" | "configure" | "result";
 
@@ -26,11 +26,12 @@ export default function StickerGeneratorApp() {
   const [isBusy, setIsBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [bgWarning, setBgWarning] = useState<string | null>(null);
 
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [project, setProject] = useState<StickerProject | null>(null);
   const [finalCanvas, setFinalCanvas] = useState<HTMLCanvasElement | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [workingCanvasClipped, setWorkingCanvasClipped] = useState(false);
 
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
@@ -39,26 +40,58 @@ export default function StickerGeneratorApp() {
   const downloadCountRef = useRef(0);
   const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleFileSelected = useCallback(async (file: File) => {
-    setError(null);
-    setBgWarning(null);
+  const processUpload = useCallback(
+    async (file: File) => {
+      setError(null);
+      setIsBusy(true);
+      setBusyLabel("กำลังวิเคราะห์และตัดพื้นหลัง...");
+      try {
+        const outcome = await removeBackgroundAndBuildLayer(file, CANVAS_SIZE);
+        const initial = createInitialProject(outcome.layer, style, emotion, customText);
+        setProject(initial);
+        setFinalCanvas(null);
+        setValidation(null);
+        setPhase("configure");
+        return initial;
+      } catch (e) {
+        console.error(e);
+        setError("ไม่สามารถประมวลผลภาพได้ ลองใหม่อีกครั้ง");
+        return null;
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [style, emotion, customText]
+  );
+
+  const handleFileSelected = useCallback(
+    async (file: File) => {
+      setUploadedFile(file);
+      await processUpload(file);
+    },
+    [processUpload]
+  );
+
+  const handleRetryBackgroundRemoval = useCallback(async () => {
+    if (!uploadedFile) return;
+    const initial = await processUpload(uploadedFile);
+    if (!initial) return;
     setIsBusy(true);
-    setBusyLabel("กำลังวิเคราะห์และตัดพื้นหลัง...");
+    setBusyLabel("กำลังสร้างสติ๊กเกอร์...");
     try {
-      const outcome = await removeBackgroundAndBuildLayer(file, CANVAS_SIZE);
-      const initial = createInitialProject(outcome.layer, style, emotion, customText);
-      setProject(initial);
-      setFinalCanvas(null);
-      setValidation(null);
-      setBgWarning(outcome.warning ?? null);
-      setPhase("configure");
+      const outcome = await runGenerationPipeline(initial);
+      setProject(outcome.project);
+      setFinalCanvas(outcome.finalCanvas);
+      setValidation(outcome.validation);
+      setWorkingCanvasClipped(outcome.workingCanvasClipped);
+      setPhase("result");
     } catch (e) {
       console.error(e);
-      setError("ไม่สามารถประมวลผลภาพได้ ลองใหม่อีกครั้ง");
+      setError("สร้างสติ๊กเกอร์ไม่สำเร็จ ลองใหม่อีกครั้ง");
     } finally {
       setIsBusy(false);
     }
-  }, [style, emotion, customText]);
+  }, [uploadedFile, processUpload]);
 
   const runGenerate = useCallback(async () => {
     if (!project?.character) return;
@@ -71,6 +104,7 @@ export default function StickerGeneratorApp() {
       setProject(outcome.project);
       setFinalCanvas(outcome.finalCanvas);
       setValidation(outcome.validation);
+      setWorkingCanvasClipped(outcome.workingCanvasClipped);
       setPhase("result");
       setSelectedLayerId(null);
     } catch (e) {
@@ -88,40 +122,50 @@ export default function StickerGeneratorApp() {
       const outcome = await refreshAfterEdit(updated);
       setFinalCanvas(outcome.finalCanvas);
       setValidation(outcome.validation);
+      setWorkingCanvasClipped(outcome.workingCanvasClipped);
     }, 250);
   }, []);
 
   const handleDownload = useCallback(async () => {
     if (!finalCanvas) return;
     setIsBusy(true);
-    setBusyLabel("กำลังตรวจสอบไฟล์ก่อนดาวน์โหลด...");
+    setBusyLabel("กำลัง Normalize และตรวจสอบไฟล์...");
     try {
-      const result = await validateSticker({
-        finalCanvas,
-        workingCanvasClipped: false,
-        isFallbackCutout: project?.character?.isFallbackCutout ?? false,
-      });
-      setValidation(result);
       const filename = nextStickerFilename(downloadCountRef.current);
-      await exportCanvasAsPng(finalCanvas, filename);
+      const outcome = await exportCanvasAsPng(finalCanvas, filename, {
+        workingCanvasClipped,
+        isFallbackCutout: project?.character?.isFallbackCutout ?? false,
+        profile: DEFAULT_EXPORT_PROFILE,
+      });
+      setValidation(outcome.validation);
+      setFinalCanvas(outcome.finalCanvas);
       downloadCountRef.current += 1;
     } catch (e) {
-      console.error(e);
-      setError("ดาวน์โหลดไม่สำเร็จ ลองใหม่อีกครั้ง");
+      if (e instanceof ExportBlockedError) {
+        setValidation(e.validation);
+        setError(e.message);
+      } else {
+        console.error(e);
+        setError("ดาวน์โหลดไม่สำเร็จ ลองใหม่อีกครั้ง");
+      }
     } finally {
       setIsBusy(false);
     }
-  }, [finalCanvas, project]);
+  }, [finalCanvas, project, workingCanvasClipped]);
 
   const handleChangePhoto = () => {
     setPhase("upload");
+    setUploadedFile(null);
     setProject(null);
     setFinalCanvas(null);
     setValidation(null);
+    setWorkingCanvasClipped(false);
     setIsEditorOpen(false);
     setSelectedLayerId(null);
     downloadCountRef.current = 0;
   };
+
+  const isFallbackCutout = project?.character?.isFallbackCutout ?? false;
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-8">
@@ -129,11 +173,10 @@ export default function StickerGeneratorApp() {
         <h1 className="text-2xl font-extrabold tracking-tight text-slate-800">
           LUXSTICKER <span className="text-pink-500">AI</span>
         </h1>
-        <p className="text-sm text-slate-500">สร้างสติ๊กเกอร์จากรูปคนจริง ตัดพื้นหลัง จัดองค์ประกอบ พร้อมใช้ทันที</p>
+        <p className="text-sm text-slate-500">สร้างสติ๊กเกอร์จากรูปคนจริง ตัดพื้นหลัง จัดองค์ประกอบ พร้อมใช้กับ LINE Creators Market</p>
       </header>
 
       {error && <div className="rounded-xl bg-red-50 px-4 py-2 text-sm font-medium text-red-600">{error}</div>}
-      {bgWarning && <div className="rounded-xl bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700">{bgWarning}</div>}
 
       {phase === "upload" && (
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -163,7 +206,7 @@ export default function StickerGeneratorApp() {
 
           <div className="flex flex-col items-center gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <FinalPreviewCanvas source={finalCanvas} />
-            {validation && <ValidationChecklist result={validation} />}
+
             {finalCanvas && (
               <div className="flex w-full gap-2">
                 <button
@@ -179,15 +222,19 @@ export default function StickerGeneratorApp() {
                 >
                   🔁 Regenerate
                 </button>
-                <button
-                  onClick={handleDownload}
-                  disabled={isBusy}
-                  className="flex-1 rounded-xl bg-emerald-500 py-2.5 text-sm font-bold text-white hover:bg-emerald-600 disabled:opacity-50"
-                >
-                  ⬇ Download PNG
-                </button>
               </div>
             )}
+
+            <ExportStatusCard
+              validation={validation}
+              isFallbackCutout={isFallbackCutout}
+              isBusy={isBusy}
+              profile={DEFAULT_EXPORT_PROFILE}
+              onDownload={handleDownload}
+              onFixAutomatically={runGenerate}
+              onRetryBackgroundRemoval={handleRetryBackgroundRemoval}
+              onChangePhoto={handleChangePhoto}
+            />
           </div>
         </section>
       )}
