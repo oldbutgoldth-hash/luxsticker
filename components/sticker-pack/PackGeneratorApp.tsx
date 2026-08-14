@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { PackPresetId, PackSize, PackStickerItem, StickerPack, StickerProject, StyleId } from "@/types";
+import type { ExpressionId, PackPresetId, PackSize, PackStickerItem, PoseId, StickerPack, StickerProject, StyleId } from "@/types";
 import UploadDropzone from "@/components/upload/UploadDropzone";
 import StylePicker from "@/components/panels/StylePicker";
 import PackSizePicker from "./PackSizePicker";
@@ -16,11 +16,19 @@ import { removeBackgroundAndBuildLayer } from "@/engines/background-remover";
 import { buildCharacterMaster } from "@/lib/character-master";
 import { CANVAS_SIZE, nextId } from "@/lib/project-factory";
 import { buildStickerPlan } from "@/lib/plan-builder";
-import { generatePackStickers, regeneratePackSticker, saveEditedPackSticker, renderPackSticker, toPackStickerItem } from "@/lib/pack-pipeline";
+import {
+  generatePackStickersWithAI,
+  regeneratePackStickerWithAI,
+  acceptOriginalCharacter,
+  saveEditedPackSticker,
+  renderPackSticker,
+  toPackStickerItem,
+} from "@/lib/pack-pipeline";
 import { validateStickerPack } from "@/lib/pack-validation";
 import { savePackSnapshot, loadPackSnapshot, clearPackStorage } from "@/lib/pack-storage";
 import { exportPackAsZip } from "@/lib/pack-export";
 import { APP_VERSION } from "@/lib/app-version";
+import { resolveClientProviderName, isMockProvider } from "@/providers/ai/registry";
 
 type Step = "upload" | "size" | "preset" | "plan" | "generating" | "dashboard";
 
@@ -37,6 +45,10 @@ function newPack(style: StyleId): StickerPack {
     character: null,
     plan: [],
     stickers: [],
+    // Phase 2.5 §24 — default OFF: Phase 2's Character Master + Composition/
+    // Text/Decoration variation already produces a complete pack with zero
+    // AI cost, so AI Expressions are an opt-in upgrade, never a requirement.
+    useAiExpressions: false,
     createdAt: now,
     updatedAt: now,
   };
@@ -48,8 +60,21 @@ export default function PackGeneratorApp() {
   const [isBusy, setIsBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState({ done: 0, total: 0, stage: "" });
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    stage: string;
+    current?: { text: string; expression?: ExpressionId; pose?: PoseId };
+  }>({ done: 0, total: 0, stage: "" });
   const [selectedSticker, setSelectedSticker] = useState<PackStickerItem | null>(null);
+
+  // Phase 2.5 §4/§8/§25 — resolved once per mount, not re-read from
+  // process.env on every render/call: the client only ever knows the
+  // provider's short name (never a secret), used purely to pick which
+  // AIImageProvider instance to talk to and whether to show the
+  // "DEVELOPMENT MODE / MOCK AI" banner.
+  const providerName = resolveClientProviderName();
+  const usingMockProvider = isMockProvider(providerName);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -123,8 +148,13 @@ export default function PackGeneratorApp() {
     setStep("generating");
     setProgress({ done: 0, total: pack.plan.length, stage: "Preparing" });
     try {
-      const stickers = await generatePackStickers(pack.character, pack.plan, pack.style, (done, total, stage) =>
-        setProgress({ done, total, stage })
+      const stickers = await generatePackStickersWithAI(
+        pack.character,
+        pack.plan,
+        pack.style,
+        pack.useAiExpressions,
+        providerName,
+        (done, total, stage, current) => setProgress({ done, total, stage, current })
       );
       setPack((prev) => (prev ? { ...prev, stickers, status: "REVIEW", updatedAt: new Date().toISOString() } : prev));
       setStep("dashboard");
@@ -135,7 +165,7 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack]);
+  }, [pack, providerName]);
 
   const updateSticker = (updated: PackStickerItem) => {
     setPack((prev) => (prev ? { ...prev, stickers: prev.stickers.map((s) => (s.id === updated.id ? updated : s)) } : prev));
@@ -159,7 +189,19 @@ export default function PackGeneratorApp() {
     if (!planItem) return;
     setIsBusy(true);
     try {
-      const updated = await regeneratePackSticker(pack.character, planItem, pack.style, selectedSticker);
+      // Spec §20/§32: Regenerate touches only this one sticker, through the
+      // exact same AI-aware path batch generation uses when AI Expressions
+      // are on — when off, this is `regeneratePackStickerWithAI`'s no-AI
+      // branch, which is byte-identical to the old `regeneratePackSticker`
+      // call it replaces.
+      const updated = await regeneratePackStickerWithAI(
+        pack.character,
+        planItem,
+        pack.style,
+        pack.useAiExpressions,
+        providerName,
+        selectedSticker
+      );
       updateSticker(updated);
     } catch (e) {
       console.error(e);
@@ -167,7 +209,34 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack, selectedSticker]);
+  }, [pack, selectedSticker, providerName]);
+
+  /** Spec §17/§20 — the "Retry" button on a "needs_ai" sticker's failure
+   * banner. Always goes through AI (that's the whole point of retrying),
+   * regardless of the pack-level toggle, since the user is explicitly
+   * asking to try the AI call again for this one sticker. */
+  const handleAiRetry = useCallback(async () => {
+    if (!pack?.character || !selectedSticker) return;
+    const planItem = pack.plan.find((p) => p.id === selectedSticker.planItemId);
+    if (!planItem) return;
+    setIsBusy(true);
+    try {
+      const updated = await regeneratePackStickerWithAI(pack.character, planItem, pack.style, true, providerName, selectedSticker);
+      updateSticker(updated);
+    } catch (e) {
+      console.error(e);
+      setError("AI สร้างภาพไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [pack, selectedSticker, providerName]);
+
+  /** Spec §17 — "Use Original Character": accept the already-rendered
+   * fallback instead of retrying. No AI call, no re-render. */
+  const handleUseOriginalCharacter = useCallback(() => {
+    if (!selectedSticker) return;
+    updateSticker(acceptOriginalCharacter(selectedSticker));
+  }, [selectedSticker]);
 
   const handleDuplicate = useCallback(async () => {
     if (!pack?.character || !selectedSticker) return;
@@ -288,6 +357,35 @@ export default function PackGeneratorApp() {
       {step === "plan" && pack && (
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <StickerPlanEditor plan={pack.plan} onChange={(plan) => setPack({ ...pack, plan })} />
+
+          {/* Spec §24 — [✓] Use AI Expressions toggle, default OFF. */}
+          <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
+            <input
+              type="checkbox"
+              checked={pack.useAiExpressions}
+              onChange={(e) => setPack({ ...pack, useAiExpressions: e.target.checked })}
+              className="h-4 w-4"
+            />
+            ใช้ AI Expressions (ทดลอง) — สร้างสีหน้า/ท่าทางแตกต่างกันต่อภาพด้วย AI
+          </label>
+
+          {pack.useAiExpressions && (
+            <div className="space-y-2 rounded-xl border-2 border-violet-200 bg-violet-50 p-4">
+              {usingMockProvider && (
+                <p className="text-xs font-bold text-red-600">
+                  ⚠ DEVELOPMENT MODE — MOCK AI (AI_PROVIDER=mock) ภาพที่ได้ไม่ใช่ AI จริง เป็นเพียงภาพต้นฉบับที่ประทับตรา &quot;MOCK — NO AI&quot;
+                  ไว้ให้เห็นชัดเจน
+                </p>
+              )}
+              {/* Spec §18/§26 — cost-control preview, shown before Generate is pressed. */}
+              <p className="text-sm font-bold text-violet-700">AI Generation Required</p>
+              <p className="text-xs text-violet-600">
+                {pack.plan.length} stickers require AI generation — Estimated generation count: {pack.plan.length}
+              </p>
+              <p className="text-xs text-violet-500">AI generation may incur usage costs.</p>
+            </div>
+          )}
+
           <button
             onClick={runGeneratePack}
             disabled={isBusy || pack.plan.length === 0}
@@ -298,7 +396,9 @@ export default function PackGeneratorApp() {
         </section>
       )}
 
-      {step === "generating" && <PackProgress done={progress.done} total={progress.total} stage={progress.stage} />}
+      {step === "generating" && (
+        <PackProgress done={progress.done} total={progress.total} stage={progress.stage} current={progress.current} />
+      )}
 
       {step === "dashboard" && pack && summary && (
         <section className="space-y-4">
@@ -338,6 +438,8 @@ export default function PackGeneratorApp() {
           onRegenerate={handleRegenerate}
           onDuplicate={handleDuplicate}
           onDelete={handleDelete}
+          onAiRetry={handleAiRetry}
+          onUseOriginalCharacter={handleUseOriginalCharacter}
         />
       )}
 

@@ -1,6 +1,7 @@
-import type { CharacterLayer, CharacterMaster } from "@/types";
+import type { CharacterLayer, CharacterMaster, CharacterReferenceSource, CharacterSource } from "@/types";
 import { loadImage } from "./image-loader";
-import { createCanvas, get2dContext, hexToRgb } from "./canvas-utils";
+import { hexToRgb } from "./canvas-utils";
+import { sampleImagePixels, hashPixelData, computeCharacterHash } from "./character-hash";
 
 let idCounter = 0;
 function nextMasterId(): string {
@@ -8,18 +9,14 @@ function nextMasterId(): string {
   return `master-${idCounter}-${Date.now().toString(36)}`;
 }
 
-/** Cheap, deterministic dominant-color sampling — draws the cutout at a tiny
- * resolution, buckets opaque pixels into quantized RGB bins, and returns the
- * most frequent few as hex strings. This is real pixel math, not an AI
- * attribute detector (spec §35: no fake AI) — it's just descriptive metadata
- * for the Character Master, e.g. to tint UI accents later. */
-function sampleDominantColors(image: HTMLImageElement, maxColors = 5): string[] {
-  const SAMPLE_SIZE = 32;
-  const canvas = createCanvas(SAMPLE_SIZE, SAMPLE_SIZE);
-  const ctx = get2dContext(canvas);
-  ctx.drawImage(image, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
-  const { data } = ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
-
+/** Cheap, deterministic dominant-color sampling from an already-sampled
+ * pixel buffer (shared with character-hash.ts's `sampleImagePixels`, so the
+ * cutout is only drawn/read once per Character Master build) — buckets
+ * opaque pixels into quantized RGB bins and returns the most frequent few as
+ * hex strings. This is real pixel math, not an AI attribute detector (spec
+ * §35: no fake AI) — it's just descriptive metadata for the Character
+ * Master, e.g. to tint UI accents later. */
+function dominantColorsFromPixelData(data: Uint8ClampedArray, maxColors = 5): string[] {
   const buckets = new Map<string, { count: number; r: number; g: number; b: number }>();
   const QUANT = 32;
   for (let i = 0; i < data.length; i += 4) {
@@ -54,7 +51,9 @@ function rgbToHex(r: number, g: number, b: number): string {
  */
 export async function buildCharacterMaster(character: CharacterLayer): Promise<CharacterMaster> {
   const image = await loadImage(character.cutoutUrl);
-  const dominantColors = sampleDominantColors(image);
+  const pixels = sampleImagePixels(image);
+  const dominantColors = dominantColorsFromPixelData(pixels);
+  const characterHash = hashPixelData(pixels);
   return {
     id: nextMasterId(),
     originalUrl: character.originalUrl,
@@ -63,6 +62,7 @@ export async function buildCharacterMaster(character: CharacterLayer): Promise<C
     naturalHeight: character.naturalHeight,
     isFallbackCutout: character.isFallbackCutout,
     dominantColors,
+    characterHash,
     createdAt: new Date().toISOString(),
   };
 }
@@ -74,7 +74,7 @@ export async function buildCharacterMaster(character: CharacterLayer): Promise<C
  * same `cutoutUrl`, never a re-generated or re-cut image.
  */
 export function characterLayerFromMaster(
-  master: CharacterMaster,
+  master: CharacterSource,
   transform: { x: number; y: number; scale: number; rotation: number }
 ): CharacterLayer {
   return {
@@ -87,6 +87,27 @@ export function characterLayerFromMaster(
     naturalWidth: master.naturalWidth,
     naturalHeight: master.naturalHeight,
     isFallbackCutout: master.isFallbackCutout,
+  };
+}
+
+/**
+ * Builds an ad-hoc `CharacterReferenceSource` from a single-sticker flow's
+ * `CharacterLayer` (spec §32 — the single-sticker generator has no
+ * `CharacterMaster` of its own, but the AI Expression Engine only needs
+ * these 5 fields + a hash, so it can reuse `generateCharacterExpression`
+ * unmodified instead of the pack flow needing a second, duplicate
+ * implementation). Re-hashes on every call — cheap (32x32 sample) and
+ * correct even if the same cutout URL gets reused across uploads.
+ */
+export async function characterReferenceFromLayer(character: CharacterLayer): Promise<CharacterReferenceSource> {
+  const characterHash = await computeCharacterHash(character.cutoutUrl);
+  return {
+    originalUrl: character.originalUrl,
+    cutoutUrl: character.cutoutUrl,
+    naturalWidth: character.naturalWidth,
+    naturalHeight: character.naturalHeight,
+    isFallbackCutout: character.isFallbackCutout,
+    characterHash,
   };
 }
 

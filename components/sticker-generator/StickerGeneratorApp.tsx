@@ -15,6 +15,10 @@ import { runGenerationPipeline, refreshAfterEdit } from "@/lib/pipeline";
 import { createInitialProject, CANVAS_SIZE } from "@/lib/project-factory";
 import { nextStickerFilename, exportCanvasAsPng, ExportBlockedError } from "@/engines/export-engine";
 import { DEFAULT_EXPORT_PROFILE } from "@/config/export-profiles";
+import { characterReferenceFromLayer, characterLayerFromMaster } from "@/lib/character-master";
+import { generateCharacterExpression } from "@/lib/expression-pipeline";
+import { EMOTION_EXPRESSION_MAP } from "@/config/expression-presets";
+import { resolveClientProviderName, isMockProvider } from "@/providers/ai/registry";
 
 type Phase = "upload" | "configure" | "result";
 
@@ -37,6 +41,14 @@ export default function StickerGeneratorApp() {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0.85);
+
+  // Phase 2.5 §32 — the single-sticker flow reuses the exact same AI
+  // Expression Engine the pack flow uses (lib/expression-pipeline.ts), not a
+  // second implementation. Default OFF per spec §24.
+  const [useAiExpression, setUseAiExpression] = useState(false);
+  const [aiWarning, setAiWarning] = useState<string | null>(null);
+  const providerName = resolveClientProviderName();
+  const usingMockProvider = isMockProvider(providerName);
 
   const downloadCountRef = useRef(0);
   const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -97,10 +109,30 @@ export default function StickerGeneratorApp() {
   const runGenerate = useCallback(async () => {
     if (!project?.character) return;
     setError(null);
+    setAiWarning(null);
     setIsBusy(true);
-    setBusyLabel("กำลังสร้างสติ๊กเกอร์...");
+    setBusyLabel(useAiExpression ? "กำลังสร้าง AI Expression..." : "กำลังสร้างสติ๊กเกอร์...");
     try {
-      const base = createInitialProject(project.character, style, emotion, customText);
+      let character = project.character;
+      if (useAiExpression) {
+        const reference = await characterReferenceFromLayer(project.character);
+        const target = EMOTION_EXPRESSION_MAP[emotion] ?? EMOTION_EXPRESSION_MAP.custom;
+        const expr = await generateCharacterExpression(reference, target.expression, target.pose, style, providerName);
+        character = characterLayerFromMaster(expr.source, {
+          x: project.character.x,
+          y: project.character.y,
+          scale: project.character.scale,
+          rotation: project.character.rotation,
+        });
+        if (expr.aiStatus === "AI_FAILED") {
+          setAiWarning(`AI สร้างภาพไม่สำเร็จ ใช้ภาพต้นฉบับแทน (Original Character Mode): ${expr.aiError ?? ""}`);
+        } else if (expr.aiMetadata?.mock) {
+          setAiWarning("MOCK — NO AI (AI_PROVIDER=mock) — นี่ยังไม่ใช่ผล AI จริง");
+        }
+      }
+
+      const base = createInitialProject(character, style, emotion, customText);
+      setBusyLabel("กำลังสร้างสติ๊กเกอร์...");
       const outcome = await runGenerationPipeline(base);
       setProject(outcome.project);
       setFinalCanvas(outcome.finalCanvas);
@@ -114,7 +146,7 @@ export default function StickerGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [project, style, emotion, customText]);
+  }, [project, style, emotion, customText, useAiExpression, providerName]);
 
   const commitEdit = useCallback((updated: StickerProject) => {
     setProject(updated);
@@ -199,6 +231,16 @@ export default function StickerGeneratorApp() {
             </div>
             <StylePicker value={style} onChange={setStyle} />
             <EmotionPicker value={emotion} customText={customText} onChangeEmotion={setEmotion} onChangeCustomText={setCustomText} />
+
+            <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">
+              <input type="checkbox" checked={useAiExpression} onChange={(e) => setUseAiExpression(e.target.checked)} className="h-3.5 w-3.5" />
+              ใช้ AI Expression (ทดลอง) — เปลี่ยนสีหน้า/ท่าทางด้วย AI ตามอารมณ์ที่เลือก
+            </label>
+            {useAiExpression && usingMockProvider && (
+              <p className="text-[10px] font-bold text-red-500">⚠ DEVELOPMENT MODE — MOCK AI (AI_PROVIDER=mock)</p>
+            )}
+            {aiWarning && <p className="text-[10px] font-semibold text-amber-600">{aiWarning}</p>}
+
             <button
               onClick={runGenerate}
               disabled={isBusy}

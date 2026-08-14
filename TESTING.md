@@ -200,3 +200,78 @@ timestamp. This is what actually satisfies TEST 13/14, not the timestamp.
   structurally, not by opening a produced ZIP in this sandbox.
 - Visual grid responsiveness (4-5 cols desktop / 3 tablet / 2 mobile) across
   real viewport sizes.
+
+---
+
+# Phase 2.5 — AI Expression & Pose Engine
+
+Manual test plan covering **Phase 2.5 — AI Expression & Pose Engine**: from
+one photo, generate stickers with varying expression/pose via a pluggable
+`AIImageProvider`, defaulting to a zero-cost `MockExpressionProvider` in
+development. Spec §33 requires 10 test cases — all 10 below, each noting
+whether it was verified algorithmically in this sandbox (no DOM/Canvas/
+network available here) or needs a real browser.
+
+| # | Case | Steps | Expected | Sandbox-verified |
+|---|------|-------|----------|-------------------|
+| 01 | Mock Provider | Generate a sticker with "ใช้ AI Expression"/"ใช้ AI Expressions" on, `AI_PROVIDER=mock` | `MockExpressionProvider.generateExpression()` returns the same character reference cutout, stamped with a visible "MOCK — NO AI (emotion/pose)" badge; `metadata.mock === true`; UI never shows "AI Generated" for this result | Code review + type-check — `MockExpressionProvider` draws to an `HTMLCanvasElement`/`Image`, which needs a real browser to execute; its *contract* (never fabricates a new person, always reuses the reference cutout, always sets `mock: true`) was verified by reading `providers/ai/mock-expression-provider.ts` line by line against spec §6 |
+| 02 | Expression Prompt Builder | Call `buildExpressionPrompt({emotion, pose, style})` | Prompt string contains every positive preservation directive (keep same person, preserve face/hairstyle/skin tone/body/clothing/accessories/identity) AND every negative directive (no identity/hairstyle/clothing change, no extra people, no accessory removal, no age/skin tone change, no different person, no background) AND the specific expression+pose description | **Yes** — re-implemented the exact string-building logic standalone in Node (`/tmp/verify-phase-2.5.mjs`), asserted all 9 negative directives and 5 sampled positive directives are present, plus the expression/pose text itself |
+| 03 | Character Reference Input | Compute `characterHash` for two identical cutouts vs. one different cutout | Same pixel content → same hash (cache can hit); different pixel content → different hash (cache must miss, never silently reuse a stale expression for a different photo) | **Yes** — re-implemented `hashPixelData`'s exact FNV-1a loop standalone in Node against synthetic pixel buffers; identical buffers hash identically, a single-byte difference changes the hash |
+| 04 | Provider Failure | Force the AI provider to throw (network error, timeout, 4xx/5xx) | `generateCharacterExpression` never throws out of the pipeline; returns `aiStatus: "AI_FAILED"`, `characterMode: "original_character"`, and `source` pointing at the unmodified Character Master cutout; that one sticker's `status` becomes `"needs_ai"` — the rest of the batch is unaffected | **Yes** — re-implemented the try/catch fallback control flow standalone in Node with a provider stub that always throws; confirmed the caller never re-throws and always falls back to the reference's own cutout |
+| 05 | Retry Single Sticker | On a `"needs_ai"` sticker, click Retry | `regeneratePackStickerWithAI` re-runs `generateCharacterExpression` + render for ONLY that one `PackStickerItem` (same `id`, `attempts + 1`); every other sticker in `pack.stickers` is untouched | Verified by code review — `regeneratePackStickerWithAI`'s signature takes a single `planItem`/`previous` pair and returns a single new item; nothing in its body iterates `pack.stickers` |
+| 06 | Cache Hit | Call the expression engine twice with identical `{characterHash, emotion, pose, style}` | Second call is served from `lib/expression-cache.ts`'s in-memory Map — the underlying `AIImageProvider.generateExpression()` is called exactly once for those inputs | **Yes** — re-implemented the cache-check-before-provider-call control flow standalone in Node with a call-counting fake provider: 2 distinct inputs + 1 repeat of the first → provider called exactly 2 times, not 3 |
+| 07 | Cache Miss | Call the expression engine with a different `{emotion, pose}` than any prior call | Cache key differs (`buildExpressionCacheKey` — spec §29/§30 key shape `hash:emotion:pose:style`) → provider is called again, result cached under the new key | **Yes** — same script as #06; the third (different-emotion) call was confirmed `fromCache === false` |
+| 08 | API Key Never Exposed | Run `npm run build`, grep the compiled client bundle (`.next/static`) for the literal string `AI_PROVIDER_API_KEY` | Never appears — `AI_PROVIDER_API_KEY` is read exclusively inside `app/api/generate-expression/route.ts` (a server-only Route Handler, never bundled to the client); the client only ever sees `NEXT_PUBLIC_AI_PROVIDER` (a provider *name*, not a secret) | **Yes, ran for real** — after a clean `npm run build`: `grep -rl AI_PROVIDER_API_KEY .next/static/` → 0 matches (client bundle, clean); `grep -rl AI_PROVIDER_API_KEY .next/server/` → 4 matches (server-only chunks, correct — that's where the route handler itself lives, never shipped to a browser). Also live-tested the route: `AI_PROVIDER=mock` → 200 with the expected `{image, metadata}` JSON shape; `AI_PROVIDER=provider-a` with no `AI_PROVIDER_API_KEY` set → 501 with a generic Thai error message, key value never present in the response body |
+| 09 | 16-sticker AI Plan | `buildStickerPlan(16, presetId)` | All 16 `StickerPlanItem`s carry a valid `{expression, pose}` pair (derived from `EMOTION_EXPRESSION_MAP[item.emotion]`), independent of `compositionPresetId`/`decorationDensity` cycling already verified in Phase 2 | **Yes** — re-implemented the plan-builder's expression/pose assignment standalone in Node; all 16 items have both fields set to valid strings |
+| 10 | 40-sticker AI Plan | `buildStickerPlan(40, presetId)` | Same guarantee at the largest pack size — every item still gets a valid `{expression, pose}` pair even with heavy pool repetition | **Yes** — same script, size=40 case, all 40 items pass |
+
+## Why the shared engine matters (spec §32)
+
+`lib/expression-pipeline.ts`'s `generateCharacterExpression()` is called from
+exactly two places: `lib/pack-pipeline.ts` (`renderPackStickerWithAI`, used
+by both batch generation and single-sticker-in-a-pack regenerate) and
+`components/sticker-generator/StickerGeneratorApp.tsx` (the standalone
+single-sticker flow, via `characterReferenceFromLayer` +
+`generateCharacterExpression` directly). Verified by `grep` — there is only
+one `generateCharacterExpression` function definition in the whole codebase,
+and both call sites import it from the same module. Prompt construction
+(`buildExpressionPrompt`), caching (`expression-cache.ts`), and the provider
+registry (`providers/ai/registry.ts`) are each single-instance too, for the
+same reason.
+
+## What was verified in this sandbox (Phase 2.5)
+
+1. `npm run lint` (ESLint) — see Task 44 build report.
+2. `npm run build` (Next.js production build, Turbopack) — see Task 44 build
+   report. Confirms `app/api/generate-expression` compiles as a server Route
+   Handler and is excluded from the client bundle.
+3. `tsc --noEmit` — see Task 44 build report.
+4. Prompt builder, character hashing, cache hit/miss control flow, provider
+   failure fallback, and plan-level expression/pose assignment (TEST 02-04,
+   06, 07, 09, 10) — all re-implemented standalone in Node and run above, 19
+   assertions, all pass.
+5. Manual code-path trace: `AUTO_FIXABLE_CHECK_IDS`-style exclusion pattern
+   reused for AI — a failed AI call is never silently retried or hidden,
+   always surfaces as `status: "needs_ai"` with the exact 3 actions spec §17
+   requires (Retry / Use Original Character / Edit Manually), all wired to
+   real handlers in `PackGeneratorApp.tsx` (`handleAiRetry`,
+   `handleUseOriginalCharacter`, and the existing editor for "Edit Manually").
+6. Confirmed via `grep` that `AI_PROVIDER_API_KEY` is referenced in exactly
+   one file in the whole project: `app/api/generate-expression/route.ts`.
+
+## What still needs a real browser (Phase 2.5)
+
+- `MockExpressionProvider`'s actual canvas drawing (badge compositing) — its
+  control-flow contract was verified, but rendering needs a real
+  `HTMLCanvasElement`.
+- End-to-end AI toggle click-through in both the pack flow and the
+  single-sticker flow (checkbox → cost preview → generate → per-sticker AI
+  status badges).
+- A genuinely failing provider triggering the "needs_ai" card + banner in
+  the actual dashboard grid UI (simulated in Node here, not clicked through).
+- Real vendor integration — Phase 2.5 ships the full plumbing (interface,
+  registry, prompt builder, cache, API route, env handling) but does not
+  wire up a specific real image-generation vendor (spec §7 explicitly asks
+  for the abstraction first, not a vendor pick); `AI_PROVIDER` set to
+  anything other than `mock` currently returns a clear 501 from the API
+  route rather than a real generation.

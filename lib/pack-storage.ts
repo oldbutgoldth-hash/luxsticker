@@ -91,6 +91,7 @@ export async function savePackSnapshot(pack: StickerPack): Promise<void> {
           naturalHeight: pack.character.naturalHeight,
           isFallbackCutout: pack.character.isFallbackCutout,
           dominantColors: pack.character.dominantColors,
+          characterHash: pack.character.characterHash,
           createdAt: pack.character.createdAt,
         }
       : null,

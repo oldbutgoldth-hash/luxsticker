@@ -31,6 +31,17 @@ const STATUS_BADGE: Record<PackStickerItem["status"], { label: string; className
   ready: { label: "✓ READY", className: "bg-emerald-100 text-emerald-600" },
   needs_fix: { label: "⚠ NEEDS FIX", className: "bg-amber-100 text-amber-700" },
   error: { label: "✗ ERROR", className: "bg-red-100 text-red-600" },
+  needs_ai: { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" },
+};
+
+/** Spec §22 — per-sticker AI status shown alongside the geometry/validation
+ * status badge above, only when this sticker actually went through the AI
+ * Expression Engine (`aiStatus` is undefined for plain Phase 2 stickers). */
+const AI_STATUS_BADGE: Record<NonNullable<PackStickerItem["aiStatus"]>, { label: string; className: string }> = {
+  AI_PENDING: { label: "⏳ AI PENDING", className: "bg-slate-100 text-slate-500" },
+  AI_GENERATING: { label: "⏳ AI GENERATING", className: "bg-sky-100 text-sky-600" },
+  AI_READY: { label: "✓ AI READY", className: "bg-violet-100 text-violet-600" },
+  AI_FAILED: { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" },
 };
 
 interface Props {
@@ -63,7 +74,14 @@ export default function PackDashboardGrid({ stickers, onSelect }: Props) {
               </div>
               <div className="space-y-1 p-2">
                 <p className="truncate text-xs font-semibold text-slate-700">{sticker.project?.text?.text || "—"}</p>
-                <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.className}`}>{badge.label}</span>
+                <div className="flex flex-wrap gap-1">
+                  <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.className}`}>{badge.label}</span>
+                  {sticker.aiStatus && (
+                    <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${AI_STATUS_BADGE[sticker.aiStatus].className}`}>
+                      {AI_STATUS_BADGE[sticker.aiStatus].label}
+                    </span>
+                  )}
+                </div>
               </div>
             </button>
           );

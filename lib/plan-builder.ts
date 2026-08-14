@@ -2,6 +2,7 @@ import type { EmotionId, PackPresetId, PackSize, StickerPlanItem } from "@/types
 import { PACK_PRESETS } from "@/config/pack-presets";
 import { EMOTION_PRESETS } from "@/styles/emotion-presets";
 import { COMPOSITION_PRESETS, EMOTION_COMPOSITION_AFFINITY } from "@/config/composition-presets";
+import { EMOTION_EXPRESSION_MAP } from "@/config/expression-presets";
 
 let idCounter = 0;
 function nextPlanId(): string {
@@ -49,6 +50,7 @@ export function buildStickerPlan(size: PackSize, presetId: PackPresetId): Sticke
     const occurrence = emotionCounters.get(source.emotion) ?? 0;
     emotionCounters.set(source.emotion, occurrence + 1);
     const compositionPresetId = affinity[occurrence % affinity.length];
+    const expr = EMOTION_EXPRESSION_MAP[source.emotion] ?? EMOTION_EXPRESSION_MAP.custom;
 
     plan.push({
       id: nextPlanId(),
@@ -57,6 +59,12 @@ export function buildStickerPlan(size: PackSize, presetId: PackPresetId): Sticke
       emotion: source.emotion,
       compositionPresetId,
       decorationDensity: COMPOSITION_PRESETS[compositionPresetId].decorationDensity,
+      // Phase 2.5 — only consulted when the pack's useAiExpressions toggle is
+      // on (spec §1: otherwise this is inert extra data, Phase 2 behavior
+      // unchanged). Derived from the same `emotion` every Phase 2 plan item
+      // already carries, so no new user input is required to use AI mode.
+      expression: expr.expression,
+      pose: expr.pose,
     });
   }
   return plan;
@@ -64,6 +72,7 @@ export function buildStickerPlan(size: PackSize, presetId: PackPresetId): Sticke
 
 /** Used by [Add Sticker] in the Plan Editor — a blank-ish row the user fills in. */
 export function createBlankPlanItem(order: number): StickerPlanItem {
+  const expr = EMOTION_EXPRESSION_MAP.custom;
   return {
     id: nextPlanId(),
     order,
@@ -71,6 +80,8 @@ export function createBlankPlanItem(order: number): StickerPlanItem {
     emotion: "custom",
     compositionPresetId: "CENTER_TOP_TEXT",
     decorationDensity: "normal",
+    expression: expr.expression,
+    pose: expr.pose,
   };
 }
 

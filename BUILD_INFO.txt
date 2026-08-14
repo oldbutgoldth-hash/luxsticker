@@ -1,13 +1,16 @@
 LUXSTICKER AI
 Project: LUXSTICKER AI
-Version: 2.0.0
+Version: 2.1.0
 Build: 001
-Date: 2026-08-13 23:28:18
-Phase: Phase 2 — Sticker Pack Generator
+Date: 2026-08-14 00:29:53
+Phase: Phase 2.5 — AI Expression & Pose Engine
+AI Provider: mock (default, AI_PROVIDER env var; provider-a/provider-b reserved for real vendors)
+AI Mode: Development / Mock AI (no real vendor wired yet — plumbing only, per spec §7)
 Pack Sizes Supported: 8, 16, 24, 32, 40
 Lint: PASS (npx eslint . --max-warnings=999)
 TypeScript: PASS (tsc --noEmit)
-Build: PASS (next build, Turbopack, routes: / and /pack)
-Validation: See TESTING.md — Phase 1 + Phase 1.1 + Phase 1.2 + Phase 2 sections
+Build: PASS (next build, Turbopack, routes: /, /pack, /api/generate-expression)
+Tests: 19/19 Phase 2.5 algorithmic checks PASS + API-key-never-exposed grep PASS (see TESTING.md)
+Validation: See TESTING.md — Phase 1 + Phase 1.1 + Phase 1.2 + Phase 2 + Phase 2.5 sections
 Notes: This ZIP is a new, uniquely-named dev-build artifact. It does not
 overwrite or replace any previous luxsticker-ai*.zip in the outputs folder.
