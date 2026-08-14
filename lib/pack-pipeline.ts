@@ -19,6 +19,7 @@ import { STYLE_PRESETS } from "@/styles/style-presets";
 import { DEFAULT_EXPORT_PROFILE, type ExportProfile } from "@/config/export-profiles";
 import type { DecorationOverrides } from "@/engines/decoration-engine";
 import { generateCharacterExpression } from "./expression-pipeline";
+import { runWithConcurrencyLimit, DEFAULT_AI_CONCURRENCY } from "./concurrency";
 
 export function packStickerFilename(order: number): string {
   return `sticker_${String(order).padStart(2, "0")}.png`;
@@ -148,6 +149,16 @@ export function toPackStickerItem(
  * engine, then renders using whatever character source that produced
  * (AI result, or the original Character Master on failure — spec §17).
  */
+/** Rough shot-framing hint from a composition preset (spec §12/§13 "Full/
+ * half body based on composition") — not an exact science, just enough to
+ * bias the prompt sensibly without threading a full composition system
+ * through the AI call. */
+function compositionToShotHint(presetId: StickerPlanItem["compositionPresetId"]): "full-body" | "half-body" | "auto" {
+  if (presetId === "BIG_CHARACTER_TOP_TEXT" || presetId === "COMIC_BURST") return "full-body";
+  if (presetId === "SMALL_CHARACTER_BIG_TEXT" || presetId === "MINIMAL") return "half-body";
+  return "auto";
+}
+
 export async function renderPackStickerWithAI(
   master: CharacterMaster,
   planItem: StickerPlanItem,
@@ -155,7 +166,8 @@ export async function renderPackStickerWithAI(
   useAiExpressions: boolean,
   providerName: string,
   canvasSize: { width: number; height: number } = CANVAS_SIZE,
-  profile: ExportProfile = DEFAULT_EXPORT_PROFILE
+  profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
+  aiOptions: { model?: string; forceFresh?: boolean } = {}
 ): Promise<{ outcome: GenerationOutcome; ai?: AiRenderInfo }> {
   if (!useAiExpressions || !planItem.expression || !planItem.pose) {
     const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile);
@@ -167,7 +179,8 @@ export async function renderPackStickerWithAI(
     planItem.expression,
     planItem.pose,
     planItem.styleOverride ?? packStyle,
-    providerName
+    providerName,
+    { model: aiOptions.model, forceFresh: aiOptions.forceFresh, composition: compositionToShotHint(planItem.compositionPresetId) }
   );
   const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile, expr.source);
   return {
@@ -236,22 +249,79 @@ export async function generatePackStickersWithAI(
   packStyle: StyleId,
   useAiExpressions: boolean,
   providerName: string,
-  onProgress?: (done: number, total: number, stage: string, current?: { text: string; expression?: ExpressionId; pose?: PoseId }) => void
+  onProgress?: (
+    done: number,
+    total: number,
+    stage: string,
+    current?: { text: string; expression?: ExpressionId; pose?: PoseId },
+    perItem?: { order: number; result: "success" | "failed" }
+  ) => void,
+  aiModel?: string
 ): Promise<PackStickerItem[]> {
-  const items: PackStickerItem[] = [];
-  for (let i = 0; i < plan.length; i++) {
-    const planItem = plan[i];
-    onProgress?.(i, plan.length, `กำลังสร้างสติ๊กเกอร์ #${planItem.order}`, {
+  // Non-AI path: byte-identical to the original Phase 2 sequential loop.
+  // Left completely untouched so `useAiExpressions === false` never changes
+  // behavior (spec §1 "ห้ามรื้อระบบเดิม").
+  if (!useAiExpressions) {
+    const items: PackStickerItem[] = [];
+    for (let i = 0; i < plan.length; i++) {
+      const planItem = plan[i];
+      onProgress?.(i, plan.length, `กำลังสร้างสติ๊กเกอร์ #${planItem.order}`, {
+        text: planItem.text,
+        expression: planItem.expression,
+        pose: planItem.pose,
+      });
+      try {
+        const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, {
+          model: aiModel,
+        });
+        items.push(toPackStickerItem(planItem, outcome, ai));
+        onProgress?.(i + 1, plan.length, `เสร็จแล้ว ${i + 1}/${plan.length}`, undefined, {
+          order: planItem.order,
+          result: ai?.aiStatus === "AI_FAILED" ? "failed" : "success",
+        });
+        continue;
+      } catch (err) {
+        console.error(`[pack-pipeline] sticker #${planItem.order} failed:`, err);
+        items.push({
+          id: nextId("sticker"),
+          planItemId: planItem.id,
+          order: planItem.order,
+          filename: packStickerFilename(planItem.order),
+          project: null,
+          finalCanvas: null,
+          validation: null,
+          status: "error",
+          attempts: 1,
+        });
+      }
+      onProgress?.(i + 1, plan.length, `เสร็จแล้ว ${i + 1}/${plan.length}`, undefined, { order: planItem.order, result: "failed" });
+    }
+    return items;
+  }
+
+  // AI path (spec §25) — bounded concurrency, default 3 in flight, so a
+  // 40-sticker pack never fires 40 requests at once. Results are collected
+  // in original plan order by `runWithConcurrencyLimit`; progress/run-log
+  // reporting is driven by completion order (via a shared counter) since
+  // that's what's actually useful to show a user watching the queue drain.
+  let completed = 0;
+  const results = await runWithConcurrencyLimit(plan, DEFAULT_AI_CONCURRENCY, async (planItem) => {
+    onProgress?.(completed, plan.length, `กำลังสร้างสติ๊กเกอร์ #${planItem.order}`, {
       text: planItem.text,
       expression: planItem.expression,
       pose: planItem.pose,
     });
+    let item: PackStickerItem;
+    let result: "success" | "failed";
     try {
-      const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName);
-      items.push(toPackStickerItem(planItem, outcome, ai));
+      const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, {
+        model: aiModel,
+      });
+      item = toPackStickerItem(planItem, outcome, ai);
+      result = ai?.aiStatus === "AI_FAILED" ? "failed" : "success";
     } catch (err) {
       console.error(`[pack-pipeline] sticker #${planItem.order} failed:`, err);
-      items.push({
+      item = {
         id: nextId("sticker"),
         planItemId: planItem.id,
         order: planItem.order,
@@ -261,11 +331,17 @@ export async function generatePackStickersWithAI(
         validation: null,
         status: "error",
         attempts: 1,
-      });
+      };
+      result = "failed";
     }
-    onProgress?.(i + 1, plan.length, `เสร็จแล้ว ${i + 1}/${plan.length}`);
-  }
-  return items;
+    completed += 1;
+    onProgress?.(completed, plan.length, `เสร็จแล้ว ${completed}/${plan.length}`, undefined, {
+      order: planItem.order,
+      result,
+    });
+    return item;
+  });
+  return results;
 }
 
 /**
@@ -288,15 +364,15 @@ export async function regeneratePackSticker(
 }
 
 /**
- * Regenerates exactly one sticker THROUGH THE AI ENGINE (spec §20: Retry
- * button on a single "needs_ai" sticker) — never re-runs the whole pack.
- * Bypasses the expression cache implicitly only in the sense that a truly
- * identical {characterHash, expression, pose, style} would still cache-hit
- * (spec §29 — that's intentional, not a bug: retrying with unchanged inputs
- * after a transient network failure should succeed without a second real
- * charge once the provider is healthy again, since a cache hit only ever
- * happens after a PRIOR success, never after a failure — failures are never
- * written to the cache).
+ * Regenerates exactly one sticker THROUGH THE AI ENGINE (spec §20/§22: Retry
+ * button on a single "needs_ai" sticker, or explicit user Regenerate) —
+ * never re-runs the whole pack. Always `forceFresh` (spec §23: "[Regenerate
+ * Fresh] สำหรับผู้ใช้ที่ต้องการภาพใหม่") — a user who explicitly asked to
+ * regenerate this one sticker is asking for a NEW attempt, not a cache hit
+ * on the exact same inputs that may have just failed or produced a result
+ * they didn't like. Automatic batch generation (`generatePackStickersWithAI`)
+ * still benefits from the cache normally; only this explicit, single-sticker
+ * action bypasses it.
  */
 export async function regeneratePackStickerWithAI(
   master: CharacterMaster,
@@ -304,9 +380,19 @@ export async function regeneratePackStickerWithAI(
   packStyle: StyleId,
   useAiExpressions: boolean,
   providerName: string,
-  previous: PackStickerItem
+  previous: PackStickerItem,
+  aiModel?: string
 ): Promise<PackStickerItem> {
-  const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName);
+  const { outcome, ai } = await renderPackStickerWithAI(
+    master,
+    planItem,
+    packStyle,
+    useAiExpressions,
+    providerName,
+    CANVAS_SIZE,
+    DEFAULT_EXPORT_PROFILE,
+    { model: aiModel, forceFresh: true }
+  );
   return {
     ...toPackStickerItem(planItem, outcome, ai),
     id: previous.id,

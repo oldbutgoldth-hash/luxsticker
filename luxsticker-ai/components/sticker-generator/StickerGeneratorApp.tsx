@@ -1,0 +1,223 @@
+"use client";
+
+import { useCallback, useRef, useState } from "react";
+import type { EmotionId, StickerProject, StyleId, ValidationResult } from "@/types";
+import UploadDropzone from "@/components/upload/UploadDropzone";
+import StylePicker from "@/components/panels/StylePicker";
+import EmotionPicker from "@/components/panels/EmotionPicker";
+import StickerCanvasEditor from "@/components/sticker-editor/StickerCanvasEditor";
+import EditorToolbar from "@/components/sticker-editor/EditorToolbar";
+import FinalPreviewCanvas from "@/components/sticker-editor/FinalPreviewCanvas";
+import ValidationChecklist from "@/components/sticker-generator/ValidationChecklist";
+import { removeBackgroundAndBuildLayer } from "@/engines/background-remover";
+import { runGenerationPipeline, refreshAfterEdit } from "@/lib/pipeline";
+import { createInitialProject, CANVAS_SIZE } from "@/lib/project-factory";
+import { nextStickerFilename, exportCanvasAsPng } from "@/engines/export-engine";
+import { validateSticker } from "@/engines/validation-engine";
+
+type Phase = "upload" | "configure" | "result";
+
+export default function StickerGeneratorApp() {
+  const [phase, setPhase] = useState<Phase>("upload");
+  const [style, setStyle] = useState<StyleId>("cute");
+  const [emotion, setEmotion] = useState<EmotionId>("sawadee");
+  const [customText, setCustomText] = useState("");
+
+  const [isBusy, setIsBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [bgWarning, setBgWarning] = useState<string | null>(null);
+
+  const [project, setProject] = useState<StickerProject | null>(null);
+  const [finalCanvas, setFinalCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
+
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(0.85);
+
+  const downloadCountRef = useRef(0);
+  const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleFileSelected = useCallback(async (file: File) => {
+    setError(null);
+    setBgWarning(null);
+    setIsBusy(true);
+    setBusyLabel("กำลังวิเคราะห์และตัดพื้นหลัง...");
+    try {
+      const outcome = await removeBackgroundAndBuildLayer(file, CANVAS_SIZE);
+      const initial = createInitialProject(outcome.layer, style, emotion, customText);
+      setProject(initial);
+      setFinalCanvas(null);
+      setValidation(null);
+      setBgWarning(outcome.warning ?? null);
+      setPhase("configure");
+    } catch (e) {
+      console.error(e);
+      setError("ไม่สามารถประมวลผลภาพได้ ลองใหม่อีกครั้ง");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [style, emotion, customText]);
+
+  const runGenerate = useCallback(async () => {
+    if (!project?.character) return;
+    setError(null);
+    setIsBusy(true);
+    setBusyLabel("กำลังสร้างสติ๊กเกอร์...");
+    try {
+      const base = createInitialProject(project.character, style, emotion, customText);
+      const outcome = await runGenerationPipeline(base);
+      setProject(outcome.project);
+      setFinalCanvas(outcome.finalCanvas);
+      setValidation(outcome.validation);
+      setPhase("result");
+      setSelectedLayerId(null);
+    } catch (e) {
+      console.error(e);
+      setError("สร้างสติ๊กเกอร์ไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [project, style, emotion, customText]);
+
+  const commitEdit = useCallback((updated: StickerProject) => {
+    setProject(updated);
+    if (refreshDebounceRef.current) clearTimeout(refreshDebounceRef.current);
+    refreshDebounceRef.current = setTimeout(async () => {
+      const outcome = await refreshAfterEdit(updated);
+      setFinalCanvas(outcome.finalCanvas);
+      setValidation(outcome.validation);
+    }, 250);
+  }, []);
+
+  const handleDownload = useCallback(async () => {
+    if (!finalCanvas) return;
+    setIsBusy(true);
+    setBusyLabel("กำลังตรวจสอบไฟล์ก่อนดาวน์โหลด...");
+    try {
+      const result = await validateSticker({
+        finalCanvas,
+        workingCanvasClipped: false,
+        isFallbackCutout: project?.character?.isFallbackCutout ?? false,
+      });
+      setValidation(result);
+      const filename = nextStickerFilename(downloadCountRef.current);
+      await exportCanvasAsPng(finalCanvas, filename);
+      downloadCountRef.current += 1;
+    } catch (e) {
+      console.error(e);
+      setError("ดาวน์โหลดไม่สำเร็จ ลองใหม่อีกครั้ง");
+    } finally {
+      setIsBusy(false);
+    }
+  }, [finalCanvas, project]);
+
+  const handleChangePhoto = () => {
+    setPhase("upload");
+    setProject(null);
+    setFinalCanvas(null);
+    setValidation(null);
+    setIsEditorOpen(false);
+    setSelectedLayerId(null);
+    downloadCountRef.current = 0;
+  };
+
+  return (
+    <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-8">
+      <header className="text-center">
+        <h1 className="text-2xl font-extrabold tracking-tight text-slate-800">
+          LUXSTICKER <span className="text-pink-500">AI</span>
+        </h1>
+        <p className="text-sm text-slate-500">สร้างสติ๊กเกอร์จากรูปคนจริง ตัดพื้นหลัง จัดองค์ประกอบ พร้อมใช้ทันที</p>
+      </header>
+
+      {error && <div className="rounded-xl bg-red-50 px-4 py-2 text-sm font-medium text-red-600">{error}</div>}
+      {bgWarning && <div className="rounded-xl bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700">{bgWarning}</div>}
+
+      {phase === "upload" && (
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <UploadDropzone onFileSelected={handleFileSelected} disabled={isBusy} />
+        </section>
+      )}
+
+      {phase !== "upload" && project?.character && (
+        <section className="grid gap-6 md:grid-cols-[1fr_1fr]">
+          <div className="space-y-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-slate-700">ตั้งค่าสติ๊กเกอร์</h2>
+              <button onClick={handleChangePhoto} className="text-xs font-medium text-slate-400 hover:text-slate-600">
+                เปลี่ยนรูป
+              </button>
+            </div>
+            <StylePicker value={style} onChange={setStyle} />
+            <EmotionPicker value={emotion} customText={customText} onChangeEmotion={setEmotion} onChangeCustomText={setCustomText} />
+            <button
+              onClick={runGenerate}
+              disabled={isBusy}
+              className="w-full rounded-xl bg-pink-500 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-pink-600 disabled:opacity-50"
+            >
+              {phase === "result" ? "🔁 Regenerate" : "✨ สร้างสติ๊กเกอร์"}
+            </button>
+          </div>
+
+          <div className="flex flex-col items-center gap-3 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <FinalPreviewCanvas source={finalCanvas} />
+            {validation && <ValidationChecklist result={validation} />}
+            {finalCanvas && (
+              <div className="flex w-full gap-2">
+                <button
+                  onClick={() => setIsEditorOpen((v) => !v)}
+                  className="flex-1 rounded-xl border border-slate-300 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  {isEditorOpen ? "ปิด Editor" : "✏️ Edit"}
+                </button>
+                <button
+                  onClick={runGenerate}
+                  disabled={isBusy}
+                  className="flex-1 rounded-xl border border-slate-300 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  🔁 Regenerate
+                </button>
+                <button
+                  onClick={handleDownload}
+                  disabled={isBusy}
+                  className="flex-1 rounded-xl bg-emerald-500 py-2.5 text-sm font-bold text-white hover:bg-emerald-600 disabled:opacity-50"
+                >
+                  ⬇ Download PNG
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {isEditorOpen && project && (
+        <section className="grid gap-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:grid-cols-[2fr_1fr]">
+          <StickerCanvasEditor
+            project={project}
+            editable
+            zoom={zoom}
+            selectedLayerId={selectedLayerId}
+            onSelectLayer={setSelectedLayerId}
+            onCommit={commitEdit}
+          />
+          <EditorToolbar
+            project={project}
+            zoom={zoom}
+            onZoomChange={setZoom}
+            selectedLayerId={selectedLayerId}
+            onSelectLayer={setSelectedLayerId}
+            onProjectChange={commitEdit}
+          />
+        </section>
+      )}
+
+      {isBusy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="rounded-2xl bg-white px-6 py-4 text-sm font-semibold text-slate-700 shadow-lg">{busyLabel}</div>
+        </div>
+      )}
+    </div>
+  );
+}

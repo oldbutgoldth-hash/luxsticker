@@ -1,16 +1,16 @@
-LUXSTICKER AI
 Project: LUXSTICKER AI
-Version: 2.1.0
-Build: 001
-Date: 2026-08-14 00:29:53
-Phase: Phase 2.5 — AI Expression & Pose Engine
-AI Provider: mock (default, AI_PROVIDER env var; provider-a/provider-b reserved for real vendors)
-AI Mode: Development / Mock AI (no real vendor wired yet — plumbing only, per spec §7)
-Pack Sizes Supported: 8, 16, 24, 32, 40
-Lint: PASS (npx eslint . --max-warnings=999)
-TypeScript: PASS (tsc --noEmit)
-Build: PASS (next build, Turbopack, routes: /, /pack, /api/generate-expression)
-Tests: 19/19 Phase 2.5 algorithmic checks PASS + API-key-never-exposed grep PASS (see TESTING.md)
-Validation: See TESTING.md — Phase 1 + Phase 1.1 + Phase 1.2 + Phase 2 + Phase 2.5 sections
-Notes: This ZIP is a new, uniquely-named dev-build artifact. It does not
-overwrite or replace any previous luxsticker-ai*.zip in the outputs folder.
+Version: 3.0.0
+Build: build001
+Date: 2026-08-14 11:35:06 +07
+AI Mode: mock (default; set AI_MODE=real + AI_PROVIDER=openai + AI_PROVIDER_API_KEY to enable real generation)
+AI Provider: openai (gpt-image-1, via /v1/images/edits)
+AI Model: gpt-image-1
+Tests: lint clean, tsc --noEmit clean, 17/18 Phase 3 spec tests independently executed and passing in this sandbox (59 assertions) + 1 code-path trace (test 15) + 1 explicitly NOT EXECUTABLE (live OpenAI call, see TESTING.md and /docs/ai-provider.md)
+Lint: PASS (npx eslint . — 0 errors, 0 warnings)
+Build: PASS (npm run build — Next.js 16.3.0 / Turbopack, clean production build)
+Pack Test: Non-AI pack pipeline (Phase 2) re-verified byte-identical behavior; AI pack pipeline logic (bounded concurrency, per-sticker isolation, badge wording, cache/regenerate-fresh) verified algorithmically in Node — see TESTING.md Phase 3 section
+Known Limitations:
+  - This sandbox's outbound network is restricted to registry.npmjs.org. No live call to OpenAI's API (or any other AI vendor) could be made or observed from this environment. The real OpenAI gpt-image-1 adapter is fully implemented and type-checked but has NOT been exercised against the live API.
+  - Character consistency (Face/Hair/Clothing/Identity) has NOT been measured on any real generated image, because none was produced. No consistency percentage or quality claim is made anywhere in this build.
+  - Deploying with AI_MODE=real requires an environment with outbound access to api.openai.com and a real AI_PROVIDER_API_KEY, followed by a genuine end-to-end test before production use.
+  - Full details: /docs/ai-provider.md and TESTING.md (Phase 3 section).

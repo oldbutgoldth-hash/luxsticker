@@ -34,15 +34,25 @@ const STATUS_BADGE: Record<PackStickerItem["status"], { label: string; className
   needs_ai: { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" },
 };
 
-/** Spec §22 — per-sticker AI status shown alongside the geometry/validation
- * status badge above, only when this sticker actually went through the AI
- * Expression Engine (`aiStatus` is undefined for plain Phase 2 stickers). */
-const AI_STATUS_BADGE: Record<NonNullable<PackStickerItem["aiStatus"]>, { label: string; className: string }> = {
-  AI_PENDING: { label: "⏳ AI PENDING", className: "bg-slate-100 text-slate-500" },
-  AI_GENERATING: { label: "⏳ AI GENERATING", className: "bg-sky-100 text-sky-600" },
-  AI_READY: { label: "✓ AI READY", className: "bg-violet-100 text-violet-600" },
-  AI_FAILED: { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" },
-};
+/**
+ * Spec Phase 3 §21 — exact required wording: "✓ AI GENERATED" on success,
+ * "✓ ORIGINAL CHARACTER" when a resolved fallback is in use, "⚠ AI FAILED"
+ * while still unresolved. Only shown when this sticker actually went
+ * through the AI Expression Engine (`aiStatus` is undefined for plain
+ * Phase 2 stickers, which show no AI badge at all — honest about what
+ * actually happened, spec §34).
+ */
+function aiBadgeFor(sticker: PackStickerItem): { label: string; className: string } | null {
+  if (!sticker.aiStatus) return null;
+  if (sticker.status === "needs_ai") return { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" };
+  if (sticker.characterMode === "original_character") {
+    return { label: "✓ ORIGINAL CHARACTER", className: "bg-amber-100 text-amber-700" };
+  }
+  if (sticker.aiStatus === "AI_READY") return { label: "✓ AI GENERATED", className: "bg-violet-100 text-violet-600" };
+  if (sticker.aiStatus === "AI_GENERATING") return { label: "⏳ AI GENERATING", className: "bg-sky-100 text-sky-600" };
+  if (sticker.aiStatus === "AI_PENDING") return { label: "⏳ AI PENDING", className: "bg-slate-100 text-slate-500" };
+  return { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" };
+}
 
 interface Props {
   stickers: PackStickerItem[];
@@ -59,6 +69,7 @@ export default function PackDashboardGrid({ stickers, onSelect }: Props) {
         .sort((a, b) => a.order - b.order)
         .map((sticker) => {
           const badge = STATUS_BADGE[sticker.status];
+          const aiBadge = aiBadgeFor(sticker);
           return (
             <button
               key={sticker.id}
@@ -76,10 +87,8 @@ export default function PackDashboardGrid({ stickers, onSelect }: Props) {
                 <p className="truncate text-xs font-semibold text-slate-700">{sticker.project?.text?.text || "—"}</p>
                 <div className="flex flex-wrap gap-1">
                   <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.className}`}>{badge.label}</span>
-                  {sticker.aiStatus && (
-                    <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${AI_STATUS_BADGE[sticker.aiStatus].className}`}>
-                      {AI_STATUS_BADGE[sticker.aiStatus].label}
-                    </span>
+                  {aiBadge && (
+                    <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${aiBadge.className}`}>{aiBadge.label}</span>
                   )}
                 </div>
               </div>

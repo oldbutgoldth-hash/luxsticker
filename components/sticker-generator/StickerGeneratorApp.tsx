@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { EmotionId, StickerProject, StyleId, ValidationResult } from "@/types";
 import UploadDropzone from "@/components/upload/UploadDropzone";
@@ -19,6 +19,7 @@ import { characterReferenceFromLayer, characterLayerFromMaster } from "@/lib/cha
 import { generateCharacterExpression } from "@/lib/expression-pipeline";
 import { EMOTION_EXPRESSION_MAP } from "@/config/expression-presets";
 import { resolveClientProviderName, isMockProvider } from "@/providers/ai/registry";
+import { fetchAiStatus, type AiStatus } from "@/lib/ai-status";
 
 type Phase = "upload" | "configure" | "result";
 
@@ -49,6 +50,13 @@ export default function StickerGeneratorApp() {
   const [aiWarning, setAiWarning] = useState<string | null>(null);
   const providerName = resolveClientProviderName();
   const usingMockProvider = isMockProvider(providerName);
+
+  // Phase 3 §33 — same proactive "not configured" check as the pack flow.
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  useEffect(() => {
+    fetchAiStatus().then(setAiStatus);
+  }, []);
+  const aiUnavailable = aiStatus?.mode === "real" && !aiStatus.configured;
 
   const downloadCountRef = useRef(0);
   const refreshDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -117,7 +125,9 @@ export default function StickerGeneratorApp() {
       if (useAiExpression) {
         const reference = await characterReferenceFromLayer(project.character);
         const target = EMOTION_EXPRESSION_MAP[emotion] ?? EMOTION_EXPRESSION_MAP.custom;
-        const expr = await generateCharacterExpression(reference, target.expression, target.pose, style, providerName);
+        const expr = await generateCharacterExpression(reference, target.expression, target.pose, style, providerName, {
+          model: aiStatus?.model,
+        });
         character = characterLayerFromMaster(expr.source, {
           x: project.character.x,
           y: project.character.y,
@@ -127,7 +137,7 @@ export default function StickerGeneratorApp() {
         if (expr.aiStatus === "AI_FAILED") {
           setAiWarning(`AI สร้างภาพไม่สำเร็จ ใช้ภาพต้นฉบับแทน (Original Character Mode): ${expr.aiError ?? ""}`);
         } else if (expr.aiMetadata?.mock) {
-          setAiWarning("MOCK — NO AI (AI_PROVIDER=mock) — นี่ยังไม่ใช่ผล AI จริง");
+          setAiWarning("MOCK — NO AI (AI_MODE=mock) — นี่ยังไม่ใช่ผล AI จริง");
         }
       }
 
@@ -146,7 +156,7 @@ export default function StickerGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [project, style, emotion, customText, useAiExpression, providerName]);
+  }, [project, style, emotion, customText, useAiExpression, providerName, aiStatus]);
 
   const commitEdit = useCallback((updated: StickerProject) => {
     setProject(updated);
@@ -232,12 +242,26 @@ export default function StickerGeneratorApp() {
             <StylePicker value={style} onChange={setStyle} />
             <EmotionPicker value={emotion} customText={customText} onChangeEmotion={setEmotion} onChangeCustomText={setCustomText} />
 
-            <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">
-              <input type="checkbox" checked={useAiExpression} onChange={(e) => setUseAiExpression(e.target.checked)} className="h-3.5 w-3.5" />
+            <label
+              className={`flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600 ${aiUnavailable ? "opacity-50" : ""}`}
+            >
+              <input
+                type="checkbox"
+                checked={useAiExpression && !aiUnavailable}
+                disabled={aiUnavailable}
+                onChange={(e) => setUseAiExpression(e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
               ใช้ AI Expression (ทดลอง) — เปลี่ยนสีหน้า/ท่าทางด้วย AI ตามอารมณ์ที่เลือก
             </label>
-            {useAiExpression && usingMockProvider && (
-              <p className="text-[10px] font-bold text-red-500">⚠ DEVELOPMENT MODE — MOCK AI (AI_PROVIDER=mock)</p>
+            {aiUnavailable && (
+              <p className="text-[10px] font-bold text-red-600">⚠ AI Provider ยังไม่ได้ตั้งค่า</p>
+            )}
+            {useAiExpression && !aiUnavailable && usingMockProvider && (
+              <p className="text-[10px] font-bold text-red-500">⚠ DEVELOPMENT MODE — MOCK AI (AI_MODE=mock)</p>
+            )}
+            {useAiExpression && !aiUnavailable && !usingMockProvider && (
+              <p className="text-[10px] font-bold text-emerald-600">✓ AI_MODE=real — จะเรียก {aiStatus?.provider} จริง</p>
             )}
             {aiWarning && <p className="text-[10px] font-semibold text-amber-600">{aiWarning}</p>}
 

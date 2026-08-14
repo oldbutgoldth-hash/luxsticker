@@ -51,7 +51,10 @@ export default function PackStickerEditorModal({
               แก้ไข Sticker #{String(sticker.order).padStart(2, "0")} — {sticker.project?.text?.text}
             </h3>
             {sticker.characterMode === "original_character" && sticker.aiStatus && (
-              <p className="text-[10px] font-semibold text-amber-600">Original Character Mode (ไม่ได้ใช้ AI Expression)</p>
+              <p className="text-[10px] font-semibold text-amber-600">✓ ORIGINAL CHARACTER FALLBACK (ไม่ได้ใช้ AI Expression)</p>
+            )}
+            {sticker.aiStatus === "AI_READY" && sticker.characterMode === "ai_expression" && !sticker.aiMetadata?.mock && (
+              <p className="text-[10px] font-semibold text-violet-600">✓ AI GENERATED</p>
             )}
             {sticker.aiMetadata?.mock && (
               <p className="text-[10px] font-semibold text-red-500">MOCK — NO AI</p>

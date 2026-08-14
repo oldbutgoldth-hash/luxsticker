@@ -275,3 +275,102 @@ same reason.
   for the abstraction first, not a vendor pick); `AI_PROVIDER` set to
   anything other than `mock` currently returns a clear 501 from the API
   route rather than a real generation.
+
+---
+
+# Phase 3 — Real AI Expression & Character Generation
+
+Manual test plan covering **Phase 3 — Real AI Expression & Character
+Generation**: a real, server-only OpenAI `gpt-image-1` adapter behind the
+`AIImageProvider` interface, an `AI_MODE=mock|real` master safety switch, an
+image quality gate before any AI output can enter the sticker pipeline,
+bounded-concurrency batch generation, and cache-key/badge-wording updates.
+Spec §38 requires 18 test cases — all 18 below, each noting whether it was
+verified algorithmically in this sandbox or needs a real browser/live
+network.
+
+**Read this before the table:** per the project's explicit instruction, this
+sandbox's outbound network is restricted to `registry.npmjs.org` — direct
+`curl` tests to OpenAI, Google, Replicate, Stability, and fal.ai all failed
+at the connection level (`HTTP_STATUS:000`). This was confirmed and reported
+before the adapter was written (Task 47). Every test below that is about
+*logic* (request shape, error classification, cache keys, quality gates,
+concurrency limits, badge wording) was re-implemented standalone in Node and
+is marked **Yes**. The one test that requires an actual live call to OpenAI's
+API is marked **NOT EXECUTABLE** — this is a real, honestly-reported gap, not
+a passed test.
+
+| # | Case | Steps | Expected | Sandbox-verified |
+|---|------|-------|----------|-------------------|
+| 01 | AI_MODE default safety | Read `AI_MODE` with the var unset, empty, or set to a typo'd value | Resolves to `"mock"` in every case — only the exact string `"real"` (case-insensitive) enables the real vendor path | **Yes** — `/tmp/verify-phase-3.mjs` TEST 01, 4 assertions |
+| 02 | Real mode, provider not configured | Set `AI_MODE=real` with `AI_PROVIDER`/`AI_PROVIDER_API_KEY` unset | API route returns HTTP 503 with the exact message `"AI Provider ยังไม่ได้ตั้งค่า"` — never silently falls back to mock (spec §33) | **Yes** — TEST 02, 5 assertions |
+| 03 | Client disables AI toggle when unavailable | `GET /api/generate-expression` returns `{mode:"real", configured:false}` | "Use AI Expressions" checkbox is `disabled`, shows the "⚠ AI Provider ยังไม่ได้ตั้งค่า" warning; a `mode:"mock"` or `configured:true` status leaves it enabled | **Yes** — TEST 03, 4 assertions. Real click-through of the disabled checkbox styling needs a browser |
+| 04 | Client resolves blob: to data: before POST | `RemoteExpressionProvider.generateExpression()` called with a `characterReference.cutoutUrl` that's a `blob:` URL | `toDataUrl()` fetches and converts it to a self-contained `data:image/...;base64,...` string before the POST body is built — the server process could never resolve a browser `blob:` URL itself | **Yes** — TEST 04 (decision logic); the actual `fetch()`/`FileReader` conversion needs a real browser to execute |
+| 05 | OpenAI request shape | Call `generateWithOpenAiImages()` | Multipart form always includes `model`, `prompt`, `size`, `background: "transparent"`, `n: "1"`, and the reference image as a `Blob` | **Yes** — TEST 05, 4 assertions |
+| 06 | OpenAI error classification | Simulate HTTP 401/403/429/500 and a network abort | 401/403 → `invalid_key` → 503; 429 → `rate_limited` → 429; timeout/abort → `timeout` → 504; other → `provider_error` → 502 — every kind maps to a distinct, correct status | **Yes** — TEST 06, 9 assertions |
+| 07 | Sanitized error responses | Trigger a provider error with `NODE_ENV=production` vs. development | Production response never includes `detail` (raw HTTP body/stack); both modes show the same generic Thai message; no internals ever leak into the response body | **Yes** — TEST 07, 4 assertions |
+| 08 | Mock never mislabeled as real | Generate via `MockExpressionProvider` | Result always carries `metadata.mock: true`; UI badge logic can never render "✓ AI GENERATED" for a mock result — only "MOCK — NO AI" (spec §34: no fake AI badged as real) | **Yes** — TEST 08, 2 assertions |
+| 09 | Prompt forbids AI-rendered text | Call `buildExpressionPrompt()` | Negative directive list always includes `"Do not render any text, letters, or words in the image."` (spec §13/§14 — text comes from the app's own Canvas Text Engine, never the AI) | **Yes** — TEST 09, re-verifies the exact same string list live-read from `lib/expression-prompt-builder.ts` in this session, 2 assertions |
+| 10 | PROMPT_VERSION in cache key | Build a cache key before and after bumping `PROMPT_VERSION` | Keys differ — a prompt-wording change can never silently serve a stale image generated under the old prompt structure | **Yes** — TEST 10, 1 assertion |
+| 11 | Quality gate: resolution | Feed a 1024×1024 image and an 8×8 image through `validateAiImage` | Normal size passes; sub-32px image is rejected as "ภาพที่ได้จาก AI มีขนาดเล็กเกินไปหรือไม่ถูกต้อง" | **Yes** — TEST 11, 3 assertions |
+| 12 | Quality gate: corrupt image | Feed an undecodable image URL through `validateAiImage` | `loadImage()`'s throw is caught and reported as a quality failure ("ภาพที่ได้จาก AI เสียหาย"), never an unhandled exception that crashes the pipeline | **Yes** — TEST 12, 2 assertions |
+| 13 | Quality gate: no subject | Feed an all-transparent (or near-empty) image through `validateAiImage` | Alpha-bounding-box area below 2% of the 128×128 sample is rejected as "ไม่มีตัวละคร" — a technically-valid-but-empty AI response is never accepted as a usable sticker character | **Yes** — TEST 13, 3 assertions |
+| 14 | Any AI failure → safe fallback | Force a provider throw (network/timeout/quality-gate failure) | `generateCharacterExpression()` never throws out of the pipeline; always returns `aiStatus: "AI_FAILED"`, `characterMode: "original_character"`, `source` pointing at the unmodified Character Master cutout | **Yes** — TEST 14, 2 assertions (also re-verified in Phase 2.5's TEST 04, still holds with the new quality-gate failure mode added) |
+| 15 | AI image never bypasses the pipeline | Trace `generateCharacterExpression()`'s return value through to export | It returns a `CharacterSource`, consumed only by `characterLayerFromMaster()` — the exact same function the non-AI path uses — which always flows into the same render → Validation Engine → export chain. No code path anywhere calls `provider.generateExpression()`'s result directly into an export/download function | Code-path trace via `grep`/read — confirmed no second consumer of `ExpressionGenerationImage`/`generateCharacterExpression`'s output exists outside `expression-pipeline.ts`'s own return value |
+| 16 | Badge wording (spec §21 exact strings) | Render a sticker in each state: `needs_ai`, resolved `original_character`, `AI_READY`/`ai_expression`, no `aiStatus` at all | Shows exactly "⚠ AI FAILED" / "✓ ORIGINAL CHARACTER" / "✓ AI GENERATED" / no badge, respectively, in that precedence order | **Yes** — TEST 16, 4 assertions, matches `aiBadgeFor()` in `PackDashboardGrid.tsx` line-for-line |
+| 17 | Regenerate Fresh cache bypass | Call the expression engine twice for the same key: once normally, once with `forceFresh: true` | Normal call hits the stale cached entry; the `forceFresh` call ignores it, gets a fresh result, and writes it back so later normal calls benefit again | **Yes** — TEST 17, 3 assertions |
+| 18 | Bounded concurrency + per-item isolation | Run a 12-item batch through `runWithConcurrencyLimit(items, 3, worker)` where item #5's worker throws | Max in-flight workers never exceeds 3; item #5 reports its own failure; the other 11 complete successfully and independently — concurrency never turns one failure into a batch-wide failure | **Yes** — TEST 18, 4 assertions (12-item run, includes a stress variant with 25 items and randomized delays in `/tmp/concurrency-test/verify.mjs`, 32 further assertions) |
+| — | **Real Provider Adapter — live OpenAI call** | POST a real character reference to `https://api.openai.com/v1/images/edits` with a real `AI_PROVIDER_API_KEY` | A real edited PNG comes back, `hasTransparency: true`, decodable, passes the quality gate | **NOT EXECUTABLE IN THIS SANDBOX** — outbound network is restricted to `registry.npmjs.org`; every candidate vendor (OpenAI, Google, Replicate, Stability, fal.ai) failed at the connection level when tested directly (Task 47). The adapter's request/response *shape* was verified against OpenAI's documented API (tests 05-06 above); whether the real endpoint actually accepts and responds exactly as coded has not been observed. |
+
+## Character consistency — honestly not measurable here
+
+Spec §39 requires testing 5-10 real examples and reporting Face/Hair/
+Clothing/Identity consistency observations, and explicitly forbids claiming
+"100% consistency." Because no live call to the real provider could be made
+in this environment (see above), **no real generated image has been produced
+or observed in this session, so there is nothing here to report** — not
+"100% consistency," not "mostly consistent," nothing. This is the literal
+outcome of the constraint the project's own instructions asked to be
+reported plainly rather than worked around with mock output relabeled as
+real.
+
+## API key exposure — re-verified after the Phase 3 build
+
+Same method as Phase 2.5's TEST 08, re-run after adding the new
+`providers/ai/server/openai-image-adapter.ts` file:
+
+- `grep -rl AI_PROVIDER_API_KEY .next/static/` → **1 match**, but it is the
+  literal variable *name* inside a UI help string ("...ผู้ดูแลระบบต้องตั้งค่า
+  AI_PROVIDER และ AI_PROVIDER_API_KEY ก่อนใช้งาน AI Expressions..." in
+  `PackGeneratorApp.tsx`, telling an admin which env vars to set) — not the
+  secret *value*. Confirmed by reading the matched chunk directly: no key
+  value, only the variable name as help text.
+- `grep -rl AI_PROVIDER_API_KEY .next/server/` → 6 matches, all in
+  server-only chunks (the route handler and its imports), never shipped to a
+  browser.
+- `grep -rn openai-image-adapter` across the whole project (excluding
+  `node_modules`/`.next`) → exactly one import, from
+  `app/api/generate-expression/route.ts`. No `"use client"` file imports it.
+
+## What was verified in this sandbox (Phase 3)
+
+1. `npm run lint`, `tsc --noEmit`, `npm run build` — see Task 58 build
+   report.
+2. Tests 01-14, 16-18 above — 59 assertions, all pass
+   (`/tmp/verify-phase-3.mjs`), plus the separate 32-assertion concurrency
+   stress test.
+3. API key exposure re-check (above) — confirmed clean, with the one
+   variable-name-in-help-text occurrence explicitly distinguished from an
+   actual secret leak.
+4. `npm run build`'s route table confirms `/api/generate-expression` compiles
+   as a dynamic (`ƒ`) server route, not a static/client-bundled page.
+
+## What still needs a real browser + real network (Phase 3)
+
+- Test 04's actual `fetch()`/`FileReader` blob-to-data-URL conversion.
+- Test 15's pipeline trace as an actual click-through (upload → AI toggle →
+  generate → exported PNG), not just a code-path read.
+- The live OpenAI test row above, and everything spec §39/§40 asks for
+  (5-10 real examples, Face/Hair/Clothing/Identity consistency observations,
+  an 8-sticker real test pack) — none of this is executable from this
+  sandbox, and nothing here claims otherwise.
