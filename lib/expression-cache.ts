@@ -1,4 +1,4 @@
-import type { ExpressionId, PoseId, StyleId } from "@/types";
+import type { ExpressionId, IntentId, PoseId, StyleId } from "@/types";
 import type { ExpressionGenerationResult } from "@/providers/ai/types";
 
 /**
@@ -29,10 +29,16 @@ export interface ExpressionCacheKeyInput {
   provider: string;
   model: string;
   promptVersion: string;
+  /** Phase 3.3 §8 — optional Sticker Intent. Included in the key (when
+   * present) because it changes the prompt's Action clause, so a request
+   * with a different intent is a genuinely different request and must not
+   * silently reuse a cached image generated for a different action. */
+  intent?: IntentId;
 }
 
 export function buildExpressionCacheKey(input: ExpressionCacheKeyInput): string {
-  return `${input.characterHash}:${input.emotion}:${input.pose}:${input.style}:${input.provider}:${input.model}:${input.promptVersion}`;
+  const intentPart = input.intent ? `:${input.intent}` : "";
+  return `${input.characterHash}:${input.emotion}:${input.pose}:${input.style}:${input.provider}:${input.model}:${input.promptVersion}${intentPart}`;
 }
 
 export function getCachedExpression(key: string): ExpressionGenerationResult | undefined {

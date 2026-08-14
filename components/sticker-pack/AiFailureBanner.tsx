@@ -25,6 +25,12 @@ interface Props {
  * so it's labeled "Use Real Photo" instead of the more generic "Use Original
  * Character"; either way it is NEVER labeled or badged as a successful AI
  * result (spec §38/§39: no fake results).
+ *
+ * Phase 3.3 §16 adds a specific, spec-worded message for Mode A (style ===
+ * "real"): when the provider fails to reliably change pose/expression on a
+ * real photo, the banner must say — verbatim — "Provider นี้ไม่รองรับการ
+ * เปลี่ยนท่าทางที่เชื่อถือได้" rather than a generic error, and must never
+ * present the fallback as if it were a successful AI pose change.
  */
 export default function AiFailureBanner({ sticker, isBusy, onRetry, onUseOriginalCharacter }: Props) {
   if (sticker.status !== "needs_ai") return null;
@@ -53,9 +59,13 @@ export default function AiFailureBanner({ sticker, isBusy, onRetry, onUseOrigina
           {isCartoonStyle ? "📷 Use Real Photo" : "Use Original Character"}
         </button>
       </div>
-      {isCartoonStyle && (
+      {isCartoonStyle ? (
         <p className="text-[10px] text-red-400">
           AI แปลงเป็นสไตล์ &quot;{style}&quot; ไม่สำเร็จ — สติ๊กเกอร์นี้จะใช้ภาพถ่ายต้นฉบับแทน ไม่ใช่ภาพที่ AI สร้าง
+        </p>
+      ) : (
+        <p className="text-[10px] font-semibold text-red-400">
+          Provider นี้ไม่รองรับการเปลี่ยนท่าทางที่เชื่อถือได้ — สติ๊กเกอร์นี้จะใช้ภาพถ่ายต้นฉบับ (ท่าทางเดิม) แทน ไม่ใช่ผลลัพธ์จาก AI
         </p>
       )}
       <p className="text-[10px] text-red-400">

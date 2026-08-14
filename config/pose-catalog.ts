@@ -30,6 +30,14 @@ export const POSE_CATALOG: Record<PoseId, PoseDefinition> = {
   point: { id: "point", labelTh: "ชี้", description: "point forward with one hand" },
   sit: { id: "sit", labelTh: "นั่ง", description: "sit with a relaxed, neutral posture" },
   stand: { id: "stand", labelTh: "ยืน", description: "stand with a relaxed, neutral posture" },
+  // Phase 3.3 §6 — added to reach parity with the spec's named 15-pose list.
+  hand_on_cheek: { id: "hand_on_cheek", labelTh: "เอามือแตะแก้ม", description: "tilt head slightly and rest one hand against the cheek" },
+  sleeping: { id: "sleeping", labelTh: "นอนหลับ", description: "lie down curled up asleep, eyes closed, hands tucked near the face" },
+  running: { id: "running", labelTh: "วิ่ง", description: "run forward mid-stride with arms pumping" },
+  shy_pose: { id: "shy_pose", labelTh: "ท่าทางเขินอาย", description: "hunch shoulders slightly and fidget with both hands in front of the body" },
+  surprised_pose: { id: "surprised_pose", labelTh: "ท่าทางตกใจ", description: "lean back with both hands raised near the face, palms out" },
+  cover_mouth: { id: "cover_mouth", labelTh: "ปิดปาก", description: "cover the mouth with one hand" },
+  looking_sideways: { id: "looking_sideways", labelTh: "มองข้างๆ", description: "turn the head to look off to one side, body still facing forward" },
 };
 
 export const POSE_IDS: PoseId[] = Object.keys(POSE_CATALOG) as PoseId[];

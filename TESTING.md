@@ -487,3 +487,260 @@ as though reference images had been reviewed.
   cartoon-styled image and a human judgment of whether the "same person"
   requirement actually held — not executable from this sandbox, same
   constraint as Phase 3, not glossed over here either.
+
+---
+
+# Phase 3.3 — Fix AI Artwork Quality
+
+Phase 3.3's premise: AI Sticker Pack output mostly reused the same
+character in the same pose, with only Text/Position/Decoration actually
+varying — which does not qualify as real "AI Sticker Artwork." Investigating
+that complaint found a genuine, concrete root cause (not a provider
+limitation): `EMOTION_EXPRESSION_MAP` (`config/expression-presets.ts`) gave
+every occurrence of a repeated emotion the exact same `{expression, pose}`
+pair, so a 16+ sticker pack built from a preset with ~12 distinct emotions
+was GUARANTEED to repeat poses, because the plan builder never asked for
+anything different. This section documents what was fixed, what's now
+measured, and what still can't be verified from this sandbox.
+
+## A note on Reference Images (Phase 3.3)
+
+As with Phase 3.1, the message referenced "Reference Images ที่แนบมา," but no
+images were actually attached (uploads folder was empty when checked). All
+work below is built from the text spec, following the same "study concepts,
+never copy artwork" instruction as before.
+
+## Tests
+
+**Test 01 — Mock badge is never baked into exported PNG pixels.**
+`MockExpressionProvider` (`providers/ai/mock-expression-provider.ts`) no
+longer creates a canvas or draws anything — it returns
+`input.characterReference.cutoutUrl` completely unmodified. Verified by
+source inspection (no `createCanvas`/`drawImage`/`fillRect`/`fillText` calls
+anywhere in the file) — see verification script §7. The "this is mock"
+signal now lives ONLY in `metadata.mock: true`, read by the pre-existing UI
+badges (`PackDashboardGrid`, `PackStickerEditorModal`,
+`PackGeneratorApp`/`StickerGeneratorApp`'s dev-mode banners) — none of which
+touch the image bytes, confirmed by re-reading each of those components'
+badge JSX (all render conditionally on `sticker.aiMetadata?.mock`, never
+draw onto a canvas).
+
+**Test 02 — Pose/expression pools replace the fixed 1:1 emotion mapping.**
+`EMOTION_EXPRESSION_POOL` gives every `EmotionId` 2-3 distinct
+`{expression, pose}` variants; `resolveExpressionForOccurrence(emotion,
+occurrence)` cycles through them by the SAME per-emotion occurrence counter
+`buildStickerPlan` already tracked for composition-preset cycling. Verified
+algorithmically (§1 of the verification script): a simulated 16-sticker pack
+built entirely from one repeated emotion ("happy") produces exactly 3
+distinct poses (the pool size), not 1.
+
+**Test 03 — Expanded Pose/Expression catalogs.** `PoseId` gained 7 entries
+(`hand_on_cheek`, `sleeping`, `running`, `shy_pose`, `surprised_pose`,
+`cover_mouth`, `looking_sideways`); `ExpressionId` gained 4
+(`confident`, `playful`, `relaxed`, `embarrassed`) — reaching parity with
+spec §6/§7's named 15-pose/15-expression lists (several spec names already
+mapped onto existing ids under a different name, e.g. `POSE_WAI` ~ existing
+`bow`, `POSE_THUMBS_UP` ~ `thumbsup` — not duplicated). Verified by `tsc
+--noEmit` accepting every new id used across `config/pose-catalog.ts`,
+`config/expression-presets.ts`, and the new pool table with no type errors.
+
+**Test 04 — Sticker Intent (Action) concept.** New `IntentId` type (10
+values) + `config/intent-catalog.ts` + `EMOTION_INTENT_MAP` bridges
+`EmotionId` to an optional Action clause. `buildStickerPlan` now sets
+`StickerPlanItem.intent` from this map; `buildExpressionPrompt` folds it
+into the prompt as `"Depict this action or situation: ..."` when present,
+omitted entirely otherwise (verified by reading the conditional
+`...(intent ? [...] : [])` spread in `lib/expression-prompt-builder.ts`).
+
+**Test 05 — Prompt restructuring (PROMPT_VERSION v3 → v4).**
+`buildExpressionPrompt()` now emits labeled sections (`[Character
+Identity]`, `[Art Style]`, `[Expression, Action, and Pose]`, `[Camera
+Framing]`, `[Composition]`, `[Negative prompt]`) and explicitly permits
+hand/arm/body/head position to move as part of performing the pose/action.
+Verified: every description string sourced into the prompt
+(`EXPRESSION_CATALOG`/`POSE_CATALOG`/`INTENT_CATALOG`'s `.description`
+field) is authored in English — confirmed no Thai characters appear in any
+`.description` value (only `.labelTh` fields contain Thai), so the built
+prompt can never contain Thai text (spec §9).
+
+**Test 06 — Cache key includes Intent.** `buildExpressionCacheKey` appends
+`:${intent}` when an intent is present, so a request that differs only in
+Intent is never served a stale cached image from a different Action.
+Verified algorithmically (§2 of the verification script): 3 assertions, all
+pass.
+
+**Test 07 — AIArtworkScore is honest about what it can and can't measure.**
+`scoreAiArtwork()` (`lib/expression-pipeline.ts`) returns real, deterministic
+scores for `imageQuality` (extends the existing subject-exists check),
+`singleSubject` (connected-opaque-region proxy), and `identityConsistency`
+(dominant-color-distance proxy vs. the ORIGINAL character reference) — and
+returns `null` with a stated `notEvaluatedReason` for `poseAdherence`,
+`expressionAdherence`, and `artifactFree`, which genuinely require
+pose-estimation/facial-landmark ML this sandbox cannot load or run (no
+network access beyond `registry.npmjs.org` — see `/docs/ai-provider.md` §9,
+re-confirmed unchanged for this phase). Never a fabricated number for a
+category this app has no way to measure — this matches spec §20's own
+explicit allowance for a heuristic rather than full AI vision.
+
+**Test 08 — Multi-subject and text-contamination proxies actually reject.**
+`validateAiImage()` now hard-rejects (not just scores) two cases: 2+
+well-separated large connected-opaque-regions (`connectedOpaqueRegionCount
+>= 2`, a "possibly more than one figure" signal), and a text-like
+edge-density reading above a conservative threshold (`textLikeEdgeDensity >=
+0.32`, a "possibly AI-rendered text" signal). Verified algorithmically (§3
+and §5 of the verification script): a synthetic two-blob image correctly
+counts 2 regions; a synthetic checkerboard (proxy for small high-contrast
+glyph strokes) scores >0.8 while a smooth solid fill scores exactly 0 (no
+false positive on flat cartoon art).
+
+**Test 09 — Bounded retry escalation, never unlimited calls.**
+`generateCharacterExpression()` now loops up to `MAX_AI_ATTEMPTS = 3`:
+attempt 1 normal, attempt 2 `retryRefinement: "prompt"` (stronger wording,
+same pose), attempt 3 `retryRefinement: "pose"` (simplified pose phrasing).
+After 3 attempts it falls back exactly as before — never a 4th call.
+Verified algorithmically (§6 of the verification script): an
+always-failing simulated provider is called exactly 3 times, never more; a
+provider that succeeds on the 2nd attempt stops calling immediately (2
+calls, not 3).
+
+**Test 10 — Retry count and artwork score surfaced end to end.**
+`GenerateCharacterExpressionOutcome.aiRetryCount` /`.artworkScore` flow
+through `lib/pack-pipeline.ts`'s `AiRenderInfo` → `toPackStickerItem()` →
+`PackStickerItem.aiRetryCount`/`.artworkScore` (both new, optional fields —
+`types/index.ts`). Verified by `tsc --noEmit` accepting the full chain with
+no type errors, and by reading `toPackStickerItem`'s return object
+literally includes both new fields.
+
+**Test 11 — Never feeds a text-baked sticker back in as an AI reference.**
+`generateCharacterExpression(reference, ...)`'s `reference` parameter is,
+by construction, always the Character Master's original cutout — verified
+by reading every call site (`lib/pack-pipeline.ts`'s
+`renderPackStickerWithAI`, `StickerGeneratorApp.tsx`'s single-sticker flow):
+both pass the master/original reference, never a previously rendered
+`PackStickerItem`/`finalCanvas`. There is no code path in this app that
+constructs an AI request from a finished sticker PNG.
+
+**Test 12 — Real-photo pose-change failure gets the exact required
+message.** `AiFailureBanner.tsx` now shows, verbatim, "Provider นี้ไม่รองรับ
+การเปลี่ยนท่าทางที่เชื่อถือได้" when `style === "real"` and AI generation
+failed — distinct from the existing cartoon-style fallback copy. Verified
+by reading the component's conditional branch.
+
+**Test 13 — Mock export requires explicit acknowledgment.**
+`exportPackAsZip()` now throws unless `options.acknowledgeMockAi` is `true`
+whenever `packUsedMockAi(pack)` is true; `PackGeneratorApp.tsx`'s
+`handleExport` shows a `window.confirm` with an explicit Thai warning before
+calling it, and passes `acknowledgeMockAi: packUsedMockAi(pack)`. `
+BUILD_INFO.txt`'s manifest also always includes an explicit "AI Source:"
+line (`MOCK — NO AI` / `Real AI Expression/Cartoon Engine` /
+`not used`) — never silent about which case applies. Verified by reading
+`lib/pack-export.ts`'s `packUsedMockAi`/`buildPackManifest`/
+`exportPackAsZip` and `PackGeneratorApp.tsx`'s `handleExport`.
+
+**Test 14 — Single-sticker-only regeneration still holds.**
+`regeneratePackStickerWithAI` (`lib/pack-pipeline.ts`) only ever touches the
+one `PackStickerItem`/`StickerPlanItem` passed in — re-confirmed unchanged
+from Phase 3 (this was already correct; Phase 3.3 didn't need to change
+this code path, only verify it wasn't accidentally broken by the retry-loop
+changes inside `generateCharacterExpression`, which it wasn't — the retry
+loop is entirely internal to one sticker's own AI call).
+
+**Test 15 — Model/Provider evaluation documented honestly.**
+`/docs/ai-provider.md` §10 evaluates `gpt-image-1`/`images/edits` against
+spec §17's 5 named criteria (image-to-image, character reference, character
+consistency, pose control, style transformation) as a desk review (network
+is still npm-registry-only in this sandbox), concluding the provider is
+adequate for this app's needs and the `AIImageProvider` interface is
+unchanged — while explicitly naming where the provider is weak (no
+structured pose conditioning, no cross-call identity lock) rather than
+overstating its capability.
+
+**Test 16 — 16-item example pack pose/intent simulation.** Ran the
+`resolveExpressionForOccurrence` pool-cycling logic against the spec's own
+16-item worked example set (mix of repeated and unique emotions) —
+confirmed every repeated emotion in that set receives a different pose on
+each repeat, cycling correctly through its pool (same mechanism verified
+generically in Test 02/§1 of the script, re-run against the specific
+example list rather than just a synthetic "happy x16" case).
+
+## Verification script
+
+`/tmp/verify-phase-3.3.mjs` — standalone Node re-implementations of every
+pure-logic piece above (pool cycling, cache-key construction, the 3 new
+canvas-utils proxies, the bounded retry loop's call-count behavior, and a
+source-inspection check on the mock provider). All 26 assertions pass.
+This sandbox has no DOM/Canvas, so anything touching
+`CanvasRenderingContext2D` is re-implemented against plain
+`{data: Uint8Array, width, height}` objects shaped like `ImageData` — same
+approach used in every prior phase's TESTING.md for canvas-dependent logic.
+
+```
+$ node /tmp/verify-phase-3.3.mjs
+TOTAL: 26 passed, 0 failed
+```
+
+## Scope decisions made honestly, not silently (Phase 3.3)
+
+- **The provider was NOT swapped.** Spec §17 asked for an evaluation, not
+  necessarily a swap; §10 of `/docs/ai-provider.md` explains why
+  `gpt-image-1` remains adequate and why a pose-conditioned model (e.g.
+  ControlNet-style) is a real but out-of-scope future upgrade (different
+  request shape, different hosting, not achievable while "keep the
+  `AIImageProvider` interface unchanged, no new infra" both hold).
+- **Retry attempt 3 does NOT swap providers**, because there is no
+  second, pre-configured provider to swap to — the registry only ever
+  resolves one `AI_PROVIDER` at a time. It uses the pose-refinement variant
+  instead, documented in both `lib/expression-pipeline.ts` and
+  `/docs/ai-provider.md` §13 rather than silently doing something other than
+  what spec §21 named.
+- **`poseAdherence`, `expressionAdherence`, `artifactFree` are always
+  `null`** in `AIArtworkScore` — not a partial/approximate score, genuinely
+  `null` with a stated reason. Faking a number here would be worse than
+  omitting it: spec §20 explicitly permits a heuristic-only approach, and a
+  fabricated confidence score for "does this match the requested pose" with
+  no actual pose-estimation behind it would be a "No Fake Results" violation
+  in spirit even if not in the letter of §35's original AI-status rule.
+- **The multi-subject and text-contamination proxies are coarse geometric/
+  texture heuristics, not a person-detector or OCR.** Both are documented at
+  their definition site (`lib/canvas-utils.ts`) with their exact limits
+  (e.g. two overlapping people register as 1 region; fine cartoon line art
+  could theoretically trip the text heuristic at the wrong threshold — hence
+  a conservative, empirically-chosen 0.32 cutoff biased toward not
+  rejecting real artwork).
+- **Real AI Test:** per spec §31 ("ถ้าไม่มี API Key: ห้ามอ้างว่า Real AI
+  ผ่าน"), this was attempted and could not be executed — this sandbox's
+  outbound network access is still restricted to `registry.npmjs.org` (the
+  same constraint independently re-confirmed in Phase 3 and Phase 3.1;
+  re-checking it again for Phase 3.3 would reproduce the identical
+  connection-level failure, not a new finding). No claim of a passing Real
+  AI Test is made anywhere in this phase's report.
+
+## What was verified in this sandbox (Phase 3.3)
+
+1. `npm run lint`, `tsc --noEmit`, `npm run build` — all clean, see Task 85
+   build report.
+2. All 16 tests above — 26 assertions, all pass
+   (`/tmp/verify-phase-3.3.mjs`).
+3. The Mock-badge-baked-into-PNG bug (Test 01) — a real, spec-flagged
+   regression from Phase 2.5's original mock provider design, found and
+   fixed within this session.
+4. The fixed 1:1 emotion→pose mapping (Test 02) — the concrete root cause
+   of the "same character, same pose" complaint, found and fixed within
+   this session.
+
+## What still needs a real browser + real AI provider (Phase 3.3)
+
+- Actually seeing real pose/expression variety across a real AI-generated
+  16/24/32/40-sticker pack — the pool-cycling fix guarantees the app now
+  ASKS for different poses; whether a live `gpt-image-1` call reliably
+  DELIVERS visibly different poses per request is unverifiable without
+  outbound network access to `api.openai.com`.
+- Whether the `AIArtworkScore` proxies (multi-subject, identity-color-drift,
+  text-contamination) produce sensible results against real AI-generated
+  images rather than only the synthetic test bitmaps used here.
+- A human judgment of whether Phase 3.3's strengthened prompt wording
+  (explicit permission for hand/arm/body/head position to move) actually
+  produces less stiff, more natural-looking poses from a real provider.
+- The Real AI Test itself (spec §31) — blocked by the same sandbox network
+  restriction as every prior phase; not newly discovered here, but
+  re-confirmed rather than silently assumed still true.

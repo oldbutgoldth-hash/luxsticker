@@ -2,7 +2,7 @@ import type { EmotionId, PackPresetId, PackSize, StickerPlanItem } from "@/types
 import { PACK_PRESETS } from "@/config/pack-presets";
 import { EMOTION_PRESETS } from "@/styles/emotion-presets";
 import { COMPOSITION_PRESETS, EMOTION_COMPOSITION_AFFINITY } from "@/config/composition-presets";
-import { EMOTION_EXPRESSION_MAP } from "@/config/expression-presets";
+import { EMOTION_EXPRESSION_MAP, EMOTION_INTENT_MAP, resolveExpressionForOccurrence } from "@/config/expression-presets";
 
 let idCounter = 0;
 function nextPlanId(): string {
@@ -38,6 +38,13 @@ function buildSourcePool(presetId: PackPresetId): PoolItem[] {
  * affinity list (spec §10: no two stickers should look composed the same
  * way), tracked per-emotion so even a 40-sticker pack with lots of repeats
  * still visibly varies.
+ *
+ * Phase 3.3 §6/§27: the exact same per-emotion `occurrence` counter now ALSO
+ * drives `resolveExpressionForOccurrence` (config/expression-presets.ts),
+ * so the Nth time an emotion repeats it gets a different {expression,pose}
+ * pair too, not just a different composition. This directly fixes the
+ * Phase 3.3 complaint that repeated emotions always rendered "the same
+ * character in the same pose."
  */
 export function buildStickerPlan(size: PackSize, presetId: PackPresetId): StickerPlanItem[] {
   const pool = buildSourcePool(presetId);
@@ -50,7 +57,7 @@ export function buildStickerPlan(size: PackSize, presetId: PackPresetId): Sticke
     const occurrence = emotionCounters.get(source.emotion) ?? 0;
     emotionCounters.set(source.emotion, occurrence + 1);
     const compositionPresetId = affinity[occurrence % affinity.length];
-    const expr = EMOTION_EXPRESSION_MAP[source.emotion] ?? EMOTION_EXPRESSION_MAP.custom;
+    const expr = resolveExpressionForOccurrence(source.emotion, occurrence);
 
     plan.push({
       id: nextPlanId(),
@@ -61,10 +68,11 @@ export function buildStickerPlan(size: PackSize, presetId: PackPresetId): Sticke
       decorationDensity: COMPOSITION_PRESETS[compositionPresetId].decorationDensity,
       // Phase 2.5 — only consulted when the pack's useAiExpressions toggle is
       // on (spec §1: otherwise this is inert extra data, Phase 2 behavior
-      // unchanged). Derived from the same `emotion` every Phase 2 plan item
-      // already carries, so no new user input is required to use AI mode.
+      // unchanged). Phase 3.3: now varies per-occurrence instead of being
+      // fixed per-emotion (see resolveExpressionForOccurrence above).
       expression: expr.expression,
       pose: expr.pose,
+      intent: EMOTION_INTENT_MAP[source.emotion],
     });
   }
   return plan;

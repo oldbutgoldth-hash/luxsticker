@@ -124,9 +124,10 @@ pose text pulled from `config/expression-presets.ts` /
 `config/pose-catalog.ts`), then a negative list (no identity change, no
 extra people/limbs, no background, no text).
 
-`PROMPT_VERSION` (currently `"v2"`) is bumped whenever this structure or
-wording changes materially, and is part of the cache key — a prompt-wording
-change can never silently serve an image generated under the old prompt.
+`PROMPT_VERSION` (currently `"v4"` as of Phase 3.3 — see §12) is bumped
+whenever this structure or wording changes materially, and is part of the
+cache key — a prompt-wording change can never silently serve an image
+generated under the old prompt.
 
 ## 5. Character reference package
 
@@ -174,11 +175,18 @@ Every AI result — mock or real — passes through `validateAiImage()` in
   treated as "no real character" (an all-transparent or near-empty AI
   output), not a usable result.
 
-Any failure here throws, which `generateCharacterExpression()`'s
-`catch` block turns into `aiStatus: "AI_FAILED"` + `characterMode:
-"original_character"` — the same fallback path used for a network error or
-a provider error. The Validation Engine downstream (Phase 1, unmodified)
-still runs on top of this regardless.
+Any failure here is caught inside `generateCharacterExpression()`'s bounded
+retry loop (Phase 3.3, see §13) and, if every attempt fails, turned into
+`aiStatus: "AI_FAILED"` + `characterMode: "original_character"` — the same
+fallback path used for a network error or a provider error. The Validation
+Engine downstream (Phase 1, unmodified) still runs on top of this
+regardless.
+
+Phase 3.3 significantly expands this gate — see §11 (`AIArtworkScore`) for
+the full picture, including which additional categories (multi-subject,
+identity drift, text contamination) are now checked and which ones
+(pose/expression adherence, limb-artifact detection) are honestly marked
+"not evaluated" rather than faked.
 
 ## 7. Error handling and sanitization
 
@@ -266,3 +274,123 @@ Anyone deploying this needs to set `AI_MODE=real`, `AI_PROVIDER=openai`,
 `api.openai.com`, and run a real end-to-end test (the app's own `GET
 /api/generate-expression` status probe is a good first check that
 configuration was picked up) before trusting this in production.
+
+## 10. Phase 3.3 — Model/Provider evaluation ("is gpt-image-1 actually adequate?")
+
+Phase 3.3's core complaint was that AI Sticker Pack output mostly reused the
+same character in the same pose. Most of that turned out to be an
+**application-layer bug**, not a provider limitation — `EMOTION_EXPRESSION_MAP`
+gave every occurrence of a repeated emotion the exact same {expression, pose}
+pair, so even a real, capable provider was never being ASKED for pose
+variety in the first place (fixed in `config/expression-presets.ts`'s new
+`EMOTION_EXPRESSION_POOL` + `resolveExpressionForOccurrence`, see
+`TESTING.md`'s Phase 3.3 section). That said, spec §17 explicitly asks for
+an honest evaluation of the provider/model itself against 5 criteria. This
+is a desk review (still no live network access from this sandbox — see §9
+above, re-confirmed unchanged for Phase 3.3), not a benchmarked comparison:
+
+| Criterion | `gpt-image-1` via `images/edits` | Assessment |
+|---|---|---|
+| Image-to-image | Yes — `images/edits` takes a reference image + prompt, edits it | Adequate. This is the whole reason it was picked in Phase 3. |
+| Character reference | Single reference image per call, no dedicated "identity lock" / IP-Adapter-style mechanism | Adequate but not strong. Identity preservation relies entirely on prompt wording ("preserve facial identity exactly," etc.) with no model-level guarantee — this is the most likely real-world source of identity drift across many stickers, and prompt wording is the only lever this app has to influence it (Phase 3.3 strengthened that wording — see §12 below). |
+| Character consistency across many calls | Each call is independent; nothing carries state between the 8/16/24/32/40 stickers in a pack | Weak by design, industry-wide — no mainstream image-edit API guarantees byte-consistent identity across N independent calls. Mitigation is the same reference image on every call plus strong preservation wording, not a model capability this app can add. |
+| Pose control | No structured pose input (no skeleton/keypoint conditioning like ControlNet); pose is requested purely via natural-language prompt | Adequate for a first release, not precise. A model with explicit pose-conditioning (e.g. a ControlNet-style open-pose adapter) would give more reliable pose accuracy, at the cost of a much more complex adapter (skeleton extraction, a different request shape entirely) and typically a different, less turnkey hosting setup. Documented here as a legitimate future upgrade path, not implemented in Phase 3.3 — out of scope for "keep the `AIImageProvider` interface unchanged, no new infra." |
+| Style transformation | Prompt-driven style directive (`stylePreset.promptDirective`), same mechanism as pose | Adequate — this is a well-understood image-edit use case for this class of model. |
+
+**Conclusion:** `gpt-image-1` remains an adequate, reasonable choice for
+this app's actual requirements (image-to-image, single API key, transparent
+output, no separate account/region setup) and the `AIImageProvider`
+interface is NOT changed in Phase 3.3. The provider was not the primary
+cause of the "same pose repeated" complaint — the plan-builder's fixed
+1:1 emotion→pose mapping was. Where the provider genuinely IS a limiting
+factor (precise pose control, guaranteed identity lock), that's now stated
+honestly above rather than papered over, and the retry/quality-gate work in
+§11-§13 below is the practical mitigation available without swapping infra.
+
+## 11. Phase 3.3 — AIArtworkScore (honest quality heuristics, not real CV)
+
+`generateCharacterExpression()` now scores every AI result with an
+`AIArtworkScore` (`types/index.ts`, computed by `scoreAiArtwork()` in
+`lib/expression-pipeline.ts`) covering 6 named categories from spec §19/§20.
+Per spec §20's own explicit allowance ("ไม่ต้องอ้างว่าเป็น AI Vision ที่สมบูรณ์
+ใช้เป็น Quality Heuristic"), each field is EITHER a real, deterministic pixel
+measurement OR `null` with a stated `notEvaluatedReason` — never a fabricated
+number for a category this app has no way to actually measure:
+
+- `imageQuality` — **real**: normalized opaque-bounding-box coverage (extends the existing subject-exists check).
+- `singleSubject` — **proxy**: connected-opaque-region count on a downsampled alpha grid (`connectedOpaqueRegionCount` in `lib/canvas-utils.ts`). A real, if weak, signal for "more than one figure in frame" — not a person-detector.
+- `identityConsistency` — **proxy**: dominant-color-palette distance between the AI output and the ORIGINAL character reference (never a previous rendered sticker — see §12). A color-only fingerprint, not face-matching.
+- `poseAdherence`, `expressionAdherence`, `artifactFree` — **always `null`**. These genuinely require pose-estimation/facial-landmark ML this sandbox has no way to load or run offline (no model weights reachable — network is npm-registry-only, see §9). Marked `null` with an explicit reason rather than guessed at.
+- `textContamination` — **proxy**: `textLikeEdgeDensity` (`lib/canvas-utils.ts`) tiles the image and flags small high-local-variance patches (a coarse texture signature for rendered glyphs). Deliberately biased toward under-flagging (false negatives) over rejecting real artwork with fine detail (hair, fabric patterns) as a false positive.
+
+Two of these proxies are also wired into a HARD rejection in
+`validateAiImage()` (not just a score): a probable multi-subject result
+(2+ well-separated large opaque regions) or a probable text-contamination
+result (edge-density proxy above a conservative threshold) both fail the
+quality gate outright and feed the retry loop below — this is the concrete
+mechanism behind spec §19's "ถ้ามี Text เกิดขึ้นโดย AI: ต้องตัดออก / regenerate."
+This app has no reliable way to crop out just the offending region without
+real OCR, so "regenerate" (via the bounded retry loop) is the lever used
+instead of "crop."
+
+## 12. Phase 3.3 — Prompt restructuring + reference-image handling
+
+`buildExpressionPrompt()` (`PROMPT_VERSION` bumped `"v3" → "v4"`) now emits
+explicitly labeled sections — `[Character Identity]`, `[Art Style]`,
+`[Expression, Action, and Pose]`, `[Camera Framing]`, `[Composition]`,
+`[Negative]` — instead of one flat directive list, and adds two things spec
+§9 asked for: an optional **Action** clause (from the new `IntentId`
+concept, `config/intent-catalog.ts`) layered alongside Expression and Pose,
+and explicit permission for hand/arm/body/head position to change as part
+of performing the requested pose/action (previously the prompt only said
+*what* to change, not that the body's actual position was allowed to move
+to make that change look natural — a real gap that likely contributed to
+stiff, sample-looking output even when pose text did vary).
+
+Every catalog description consumed here (`EXPRESSION_CATALOG` /
+`POSE_CATALOG` / `INTENT_CATALOG`'s `.description` field) is authored in
+English — `.labelTh` (the Thai UI label) is never used inside a prompt, so
+Thai text can never enter the AI request (spec §9 "AI Prompt ต้องไม่รวม
+ข้อความภาษาไทย").
+
+**Reference-image handling (spec §7):** `generateCharacterExpression()`'s
+`reference` parameter is, by construction, always the Character Master's
+original cutout — every call site (`lib/pack-pipeline.ts`,
+`components/sticker-generator/StickerGeneratorApp.tsx`) passes the master
+reference, never a previously-rendered sticker (which could have baked-in
+text from the app's own Typography engine). This is enforced structurally
+by the call graph rather than a runtime check: there is no code path in
+this app that feeds a finished sticker PNG back in as an AI reference.
+
+## 13. Phase 3.3 — Bounded retry strategy
+
+Spec §21 asks for a bounded retry escalation rather than either giving up
+after one try or calling the API unboundedly. `generateCharacterExpression()`
+now loops up to `MAX_AI_ATTEMPTS = 3`:
+
+1. **Attempt 1** — the normal request.
+2. **Attempt 2** (only if attempt 1 failed the quality gate or threw) —
+   `retryRefinement: "prompt"`: the same pose/expression, with a stronger
+   closing instruction ("make the requested change clearly and unambiguously
+   visible").
+3. **Attempt 3** (only if attempt 2 also failed) — `retryRefinement: "pose"`:
+   falls back to a simplified, less-ambiguous phrasing of the pose
+   description specifically, on the theory that an overly specific pose
+   description is more likely to confuse the model into a bad result than a
+   plainer one.
+
+After 3 total attempts (never more — this is a hard cap, not a loop that can
+run away), the sticker falls back to `aiStatus: "AI_FAILED"` /
+`characterMode: "original_character"` exactly as before. The number of
+retries actually used is recorded (`aiRetryCount` on both the outcome and
+the final `PackStickerItem`) so the pack dashboard can show it.
+
+Spec §21 also names "provider/model alternative" as a possible 3rd retry
+step. This app's `AIImageProvider` registry (`providers/ai/registry.ts`)
+only ever resolves ONE provider at a time from `AI_PROVIDER` — there is no
+second, pre-configured fallback vendor to swap to automatically without the
+operator setting up and paying for a second provider's credentials, which is
+infrastructure this phase does not add (see §10's conclusion: the interface
+stays unchanged). Attempt 3 uses the pose-refinement variant instead;
+documented here rather than silently doing something different from what
+the spec named.

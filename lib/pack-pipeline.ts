@@ -1,5 +1,6 @@
 import type {
   AiGenerationStatus,
+  AIArtworkScore,
   CharacterMaster,
   CharacterMode,
   CharacterSource,
@@ -202,6 +203,10 @@ export interface AiRenderInfo {
   aiError?: string;
   aiMetadata?: ExpressionGenerationMetadata;
   characterMode?: CharacterMode;
+  /** Phase 3.3 §19/§20/§21 — surfaced through to PackStickerItem for the
+   * dashboard/editor to display; see types/index.ts's AIArtworkScore. */
+  artworkScore?: AIArtworkScore;
+  aiRetryCount?: number;
 }
 
 export function toPackStickerItem(
@@ -228,6 +233,8 @@ export function toPackStickerItem(
     aiError: ai?.aiError,
     aiMetadata: ai?.aiMetadata,
     characterMode: ai?.characterMode,
+    artworkScore: ai?.artworkScore,
+    aiRetryCount: ai?.aiRetryCount,
   };
 }
 
@@ -286,7 +293,12 @@ export async function renderPackStickerWithAI(
     planItem.pose,
     planItem.styleOverride ?? packStyle,
     providerName,
-    { model: aiOptions.model, forceFresh: aiOptions.forceFresh, composition: compositionToShotHint(planItem.compositionPresetId) }
+    {
+      model: aiOptions.model,
+      forceFresh: aiOptions.forceFresh,
+      composition: compositionToShotHint(planItem.compositionPresetId),
+      intent: planItem.intent,
+    }
   );
   const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile, expr.source, packDesign);
   return {
@@ -296,6 +308,8 @@ export async function renderPackStickerWithAI(
       aiError: expr.aiError,
       aiMetadata: expr.aiMetadata,
       characterMode: expr.characterMode,
+      artworkScore: expr.artworkScore,
+      aiRetryCount: expr.aiRetryCount,
     },
   };
 }

@@ -315,7 +315,13 @@ export type PackPresetId = "daily" | "love" | "funny" | "work" | "cute" | "trave
  * a distinct type from `EmotionId` (Phase 2's composition/decoration
  * variation key) because the spec spells out its own exact id list; a
  * mapping table (config/expression-presets.ts) bridges the two so existing
- * Phase 2 plan items keep working unchanged. */
+ * Phase 2 plan items keep working unchanged.
+ *
+ * Phase 3.3 §7 adds 4 more (confident/playful/relaxed/embarrassed) so the
+ * catalog covers all 15 expressions the Phase 3.3 spec names by ID, on top
+ * of the 19 Phase 2.5 already had (several overlap, e.g. spec's SURPRISED ~
+ * existing "surprise", SAD/CRY/ANGRY/SLEEPY/HUNGRY already existed
+ * verbatim) — nothing existing is renamed or removed. */
 export type ExpressionId =
   | "greeting"
   | "thankyou"
@@ -335,9 +341,24 @@ export type ExpressionId =
   | "sorry"
   | "fight"
   | "goodbye"
-  | "surprise";
+  | "surprise"
+  | "confident"
+  | "playful"
+  | "relaxed"
+  | "embarrassed";
 
-/** Spec §10 — the pose vocabulary the AI Expression Engine can target. */
+/** Spec §10 — the pose vocabulary the AI Expression Engine can target.
+ *
+ * Phase 3.3 §6 adds 7 more (hand_on_cheek/sleeping/running/shy_pose/
+ * surprised_pose/cover_mouth/looking_sideways) to reach parity with the
+ * spec's named 15-pose list — several already existed under a different but
+ * equivalent name (spec's POSE_WAI ~ existing "bow", POSE_THUMBS_UP ~
+ * "thumbsup", POSE_HEART_HANDS ~ "heart_hands", POSE_HOLD_STOMACH ~
+ * "hold_stomach", POSE_FIST_UP ~ "fist", POSE_JUMPING ~ "jump",
+ * POSE_LAUGHING ~ "laugh") so those are NOT duplicated here. `shy_pose` /
+ * `surprised_pose` are suffixed to avoid colliding with the existing
+ * `ExpressionId` values `"shy"`/`"surprise"` (a pose and an expression are
+ * different axes and can both apply to the same sticker at once). */
 export type PoseId =
   | "wave"
   | "bow"
@@ -355,7 +376,36 @@ export type PoseId =
   | "clap"
   | "point"
   | "sit"
-  | "stand";
+  | "stand"
+  | "hand_on_cheek"
+  | "sleeping"
+  | "running"
+  | "shy_pose"
+  | "surprised_pose"
+  | "cover_mouth"
+  | "looking_sideways";
+
+/**
+ * Phase 3.3 §8 — "Sticker Intent," a concept distinct from `ExpressionId`.
+ * An expression describes the FACE; an intent describes the ACTION/SITUATION
+ * the character is depicted doing (e.g. actively eating vs. just looking
+ * hungry) — it's what drives the "Action" clause in the AI prompt
+ * (lib/expression-prompt-builder.ts) separately from the "Expression" and
+ * "Pose" clauses, so a sticker can read as a small scene, not just a face +
+ * a static gesture. Optional everywhere it's used — a plan item / emotion
+ * that has no matching intent simply omits the Action clause from the
+ * prompt (Phase 2/2.5/3/3.1 behavior unaffected). */
+export type IntentId =
+  | "hungry_eating"
+  | "travel_ready"
+  | "fighting_spirit"
+  | "going_to_sleep"
+  | "thanking"
+  | "celebrating"
+  | "apologizing"
+  | "missing_someone"
+  | "laughing_hard"
+  | "greeting_warmly";
 
 /** Spec §21 — per-sticker AI generation lifecycle, folded into
  * PackStickerItem alongside the existing PackStickerStatus. Left undefined
@@ -384,6 +434,14 @@ export interface StickerPlanItem {
    * first built, but independently editable afterwards. */
   expression?: ExpressionId;
   pose?: PoseId;
+  /** Phase 3.3 §8 — the action/situation this sticker depicts, layered on
+   * top of `expression` (face) and `pose` (gesture). Optional; only
+   * consulted by the AI prompt builder when present. */
+  intent?: IntentId;
+  /** Phase 3.3 §19/§20 — the last AIArtworkScore this plan item's rendered
+   * sticker received, kept for debugging/inspection in the pack dashboard.
+   * Not persisted as part of export. */
+  lastArtworkScore?: AIArtworkScore;
   /** Phase 3.1 — per-item overrides of the pack's typography/color/
    * decoration/text-placement choices. Only meaningful when the pack isn't
    * locked (StickerPack.fontLocked / styleLocked) or when Manual Design mode
@@ -408,6 +466,59 @@ export interface ExpressionGenerationMetadata {
   mock: boolean;
 }
 
+/**
+ * Phase 3.3 §19/§20 — a documented, HONEST quality heuristic run on every AI
+ * result before it's allowed to become a sticker character layer. Spec §20
+ * explicitly permits this to be a heuristic ("ไม่ต้องอ้างว่าเป็น AI Vision ที่
+ * สมบูรณ์ ใช้เป็น Quality Heuristic") rather than true computer vision — this
+ * app has no ML/OCR/pose-estimation model available (no network access to
+ * fetch one, see /docs/ai-provider.md), so each sub-score is EITHER a real,
+ * fully-deterministic check computed from actual pixel data, OR `null` with
+ * `notEvaluatedReason` set when a category genuinely cannot be measured
+ * without a vision model this app doesn't have. Never a fabricated number —
+ * see lib/expression-pipeline.ts's `scoreAiArtwork()` for what each
+ * non-null field actually measures.
+ */
+export interface AIArtworkScore {
+  /** 0-1. REAL: alpha-channel bounding-box coverage (existing subject-exists
+   * check, now surfaced as a score instead of a pass/fail only). */
+  imageQuality: number;
+  /** 0-1 or null. REAL (proxy): connected-opaque-region count on a
+   * downsampled alpha grid — 1 large region scores high, 2+ well-separated
+   * large regions (a real, if weak, signal for "more than one figure in
+   * frame") score lower. Not a person-detector; documented as a proxy. */
+  singleSubject: number | null;
+  /** 0-1 or null. REAL (proxy): dominant-color-palette distance between the
+   * AI output and the original character reference cutout (reuses the same
+   * pixel-sampling utility as Character Master's `dominantColors`). Large
+   * palette drift (e.g. hair/skin tone shifted) scores lower. This is a
+   * COLOR proxy for identity, not true face-matching. */
+  identityConsistency: number | null;
+  /** null — pose adherence to the requested PoseId would require pose-
+   * estimation ML this app doesn't have access to. Always `null` with
+   * `notEvaluatedReason` set; kept as a field so the UI/report has a
+   * consistent shape to render "not evaluated" for, honestly, instead of
+   * silently omitting the category. */
+  poseAdherence: number | null;
+  /** null — same reasoning as `poseAdherence`, for whether the rendered
+   * facial expression matches the requested ExpressionId. */
+  expressionAdherence: number | null;
+  /** null — duplicate/malformed-limb detection needs pose-estimation ML.
+   * Always `null` with `notEvaluatedReason` set. */
+  artifactFree: number | null;
+  /** 0-1 or null. REAL (proxy): a conservative edge-density heuristic over
+   * small rectangular patches (text tends to cluster as small, high-
+   * contrast strokes) — NOT OCR, deliberately biased toward under-flagging
+   * rather than rejecting real artwork on a false positive. */
+  textContamination: number | null;
+  /** Human-readable reasons for each `null` field above, keyed by field
+   * name, so the UI/report can say WHY instead of just showing a dash. */
+  notEvaluatedReason: Partial<Record<
+    "singleSubject" | "identityConsistency" | "poseAdherence" | "expressionAdherence" | "artifactFree" | "textContamination",
+    string
+  >>;
+}
+
 /** One rendered sticker inside a pack. `project` is a normal StickerProject —
  * the exact same shape the single-sticker editor already knows how to
  * display and edit (spec §20: "คลิก Sticker ใดก็ได้ เปิด Editor เดิม"). */
@@ -428,6 +539,16 @@ export interface PackStickerItem {
   aiError?: string;
   aiMetadata?: ExpressionGenerationMetadata;
   characterMode?: CharacterMode;
+  /** Phase 3.3 §19/§20 — set whenever this sticker's character image went
+   * through the AI Expression Engine (mock or real); undefined for
+   * non-AI/original-character stickers, same "undefined means not
+   * applicable" convention as `aiStatus`. */
+  artworkScore?: AIArtworkScore;
+  /** Phase 3.3 §21 — how many bounded internal retry attempts
+   * (`generateCharacterExpression`'s prompt/pose-refinement escalation) ran
+   * before this sticker's final AI outcome. 0 = succeeded or failed on the
+   * first try, no retry needed. */
+  aiRetryCount?: number;
 }
 
 /** Spec §4/§5 — the single identity source every sticker in the pack is

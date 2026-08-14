@@ -39,7 +39,7 @@ import {
 } from "@/lib/pack-pipeline";
 import { validateStickerPack } from "@/lib/pack-validation";
 import { savePackSnapshot, loadPackSnapshot, clearPackStorage } from "@/lib/pack-storage";
-import { exportPackAsZip } from "@/lib/pack-export";
+import { exportPackAsZip, packUsedMockAi } from "@/lib/pack-export";
 import { APP_VERSION } from "@/lib/app-version";
 import { resolveClientProviderName, isMockProvider } from "@/providers/ai/registry";
 import { fetchAiStatus, type AiStatus } from "@/lib/ai-status";
@@ -385,12 +385,24 @@ export default function PackGeneratorApp() {
 
   const handleExport = useCallback(async () => {
     if (!pack) return;
+    // Phase 3.3 §23 — "ห้าม Export Pack แบบ Production โดยไม่แจ้งว่าเป็น Mock":
+    // a pack built under AI_MODE=mock must never export with the exact same
+    // silent, one-click flow as a real-AI pack. This confirm is the user's
+    // explicit acknowledgment; exportPackAsZip itself also refuses to run
+    // without it (belt-and-braces — the UI gate isn't the only thing
+    // preventing a silent mock export).
+    if (packUsedMockAi(pack)) {
+      const proceed = window.confirm(
+        "แพ็คนี้สร้างด้วย MOCK AI (AI_MODE=mock) — ภาพตัวละครในสติ๊กเกอร์ยังไม่ใช่ผลลัพธ์จาก AI จริง เป็นเพียงภาพต้นฉบับที่ใช้ทดสอบระบบ\n\nต้องการ Export ต่อหรือไม่? (ไฟล์ที่ได้จะไม่ใช่ผลงาน AI จริง)"
+      );
+      if (!proceed) return;
+    }
     setIsBusy(true);
     setBusyLabel("กำลัง Export ZIP...");
     setError(null);
     try {
       setPack((prev) => (prev ? { ...prev, status: "EXPORTING" } : prev));
-      const result = await exportPackAsZip(pack, APP_VERSION);
+      const result = await exportPackAsZip(pack, APP_VERSION, { acknowledgeMockAi: packUsedMockAi(pack) });
       setPack((prev) => (prev ? { ...prev, status: "EXPORTED", updatedAt: new Date().toISOString() } : prev));
       setBusyLabel(`Export สำเร็จ: ${result.filename}`);
     } catch (e) {
