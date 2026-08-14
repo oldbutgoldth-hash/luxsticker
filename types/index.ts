@@ -5,9 +5,27 @@
 // reads and writes these shapes — no engine keeps private state.
 // ============================================================================
 
-export type StyleId = "cute" | "funny" | "kawaii" | "real";
+/**
+ * Phase 3.1 §3/§4 — extended from Phase 1/2's original 4 decoration/text
+ * presets (cute/funny/kawaii/real) to also cover the 6 "Character Art
+ * Style" choices spec'd for the Style panel: Real Photo (`real`), Cartoon
+ * (`cartoon`), Kawaii (`kawaii` — already existed), Chibi (`chibi`), Comic
+ * (`comic`), Hand Drawn (`hand_drawn`). `cute`/`funny` are kept for backward
+ * compatibility with existing saved packs/projects — nothing is removed or
+ * renamed (spec §1: "ห้ามรื้อระบบเดิม") — but the new Style picker only
+ * surfaces the 6 spec'd choices (see STYLE_ORDER_V2 in styles/style-presets.ts).
+ */
+export type StyleId = "cute" | "funny" | "kawaii" | "real" | "cartoon" | "chibi" | "comic" | "hand_drawn";
 
-export const STYLE_IDS: StyleId[] = ["cute", "funny", "kawaii", "real"];
+export const STYLE_IDS: StyleId[] = ["cute", "funny", "kawaii", "real", "cartoon", "chibi", "comic", "hand_drawn"];
+
+/** Spec §3 — which of the two top-level pipelines a given StyleId belongs
+ * to. Only `real` is Mode A (no AI art transformation, background removal +
+ * optional AI expression/pose only); every other style is Mode B (AI
+ * transforms the character into that art style, when AI is enabled). */
+export function isRealPhotoStyle(style: StyleId): boolean {
+  return style === "real";
+}
 
 /** Emotion presets required by spec section 6, plus custom free text. */
 export type EmotionId =
@@ -28,6 +46,91 @@ export type EmotionId =
   | "fight" // สู้ๆ
   | "goodnight" // ฝันดี
   | "custom";
+
+// ----------------------------------------------------------------------------
+// Phase 3.1 — Typography / Color / Decoration "category" systems (spec §9-30).
+// Each is a small, independently-selectable dimension on top of StyleId, all
+// additive: a project/plan-item/pack that never sets these behaves exactly
+// as before (undefined -> resolved to a sensible default at render time).
+// ----------------------------------------------------------------------------
+
+/** Spec §10/§30 — the 8 Font Style categories the Typography panel offers,
+ * plus "auto" (system picks per spec §12's emotion matching). Users pick a
+ * *category*, never a raw font file, so new fonts can be swapped into a
+ * category later (config/font-catalog.ts) without changing this type. */
+export type FontStyleId = "auto" | "kawaii" | "cute" | "comic" | "handwritten" | "bold" | "brush" | "minimal" | "luxury";
+
+export const FONT_STYLE_IDS: FontStyleId[] = [
+  "auto",
+  "kawaii",
+  "cute",
+  "comic",
+  "handwritten",
+  "bold",
+  "brush",
+  "minimal",
+  "luxury",
+];
+
+/** Spec §26 — color theme presets, plus "auto" (resolved from Style +
+ * Emotion, spec §26: "Auto ต้องเลือกตาม Emotion + Style"). */
+export type ColorThemeId =
+  | "auto"
+  | "pink"
+  | "pastel"
+  | "purple"
+  | "blue"
+  | "mint"
+  | "yellow"
+  | "rainbow"
+  | "mono"
+  | "black_white";
+
+export const COLOR_THEME_IDS: ColorThemeId[] = [
+  "auto",
+  "pink",
+  "pastel",
+  "purple",
+  "blue",
+  "mint",
+  "yellow",
+  "rainbow",
+  "mono",
+  "black_white",
+];
+
+/** Spec §16/§30 — decoration categories (Love/Happy/Sad/Angry/Hungry(Food)/
+ * Travel/Sleep, plus "Funny" from the UI panel list in §30), plus "auto"
+ * (resolved from the sticker's Emotion). */
+export type DecorationCategoryId = "auto" | "love" | "happy" | "sad" | "angry" | "hungry" | "travel" | "sleep" | "funny";
+
+export const DECORATION_CATEGORY_IDS: DecorationCategoryId[] = [
+  "auto",
+  "love",
+  "happy",
+  "sad",
+  "angry",
+  "hungry",
+  "travel",
+  "sleep",
+  "funny",
+];
+
+/** Spec §14 — trendy text placement/treatment variants so a pack doesn't put
+ * text in the same spot on every sticker. `large_top`/`large_left`/
+ * `large_right`/`bottom`/`diagonal` are placement seeds the existing
+ * composition engine already knows how to realize (see
+ * config/text-composition-presets.ts); `curved`, `stacked`, and `mixed` are
+ * genuinely new rendering treatments implemented in engines/text-engine. */
+export type TextCompositionVariant =
+  | "large_top"
+  | "large_left"
+  | "large_right"
+  | "bottom"
+  | "curved"
+  | "diagonal"
+  | "stacked"
+  | "mixed";
 
 export type OutlineStyle = "white" | "black" | "soft-white" | "thick" | "double";
 
@@ -79,6 +182,16 @@ export interface TextLayer extends BaseLayer {
   outlineColor: string;
   outlineWidthPx: number;
   shadow: boolean;
+  /** Spec Phase 3.1 §13 — additive text treatments on top of the existing
+   * fill/outline/shadow. Both default to false/undefined so every existing
+   * TextLayer (Phase 1-3) renders identically. */
+  glow?: boolean;
+  offsetShadow?: boolean;
+  /** Spec §14 — which placement/treatment variant produced this layer's
+   * position, purely informational for `curved`/`stacked`/`mixed` (the
+   * engine needs to know which special render path to use); absent for
+   * layers built before Phase 3.1 or that used a plain autoCompose position. */
+  textComposition?: TextCompositionVariant;
 }
 
 export interface DecorationLayer extends BaseLayer {
@@ -104,6 +217,12 @@ export interface StickerProject {
   outline: OutlineConfig;
   /** Working canvas before auto-crop. Auto-crop produces the final export size. */
   canvasSize: CanvasSize;
+  /** Phase 3.1 — independently-selectable typography/color/decoration
+   * dimensions layered on top of `style`. All optional: absent means "use
+   * the Style preset's own defaults", exactly Phase 1-3 behavior. */
+  fontStyle?: FontStyleId;
+  colorTheme?: ColorThemeId;
+  decorationCategory?: DecorationCategoryId;
 }
 
 export interface ValidationCheck {
@@ -166,11 +285,24 @@ export type CompositionPresetId =
   | "DIAGONAL"
   | "COMIC_BURST"
   | "HEART_FRAME"
-  | "MINIMAL";
+  | "MINIMAL"
+  // Phase 3.1 §18 — added shot-framing variety not covered by the 10 presets
+  // above (which vary character X/Y position + text size, but not "how much
+  // of the character is visible"). Named exactly per spec's list; the other
+  // spec-listed names (PHOTO_LARGE, CHARACTER_LEFT, CENTER, TOP_TEXT, etc.)
+  // are deliberately not duplicated as separate ids — they already map
+  // 1:1 onto presets above (e.g. CHARACTER_LEFT === LEFT_CHARACTER_RIGHT_TEXT,
+  // TOP_TEXT === CENTER_TOP_TEXT) and adding aliases would just fragment the
+  // affinity tables without adding real visual variety.
+  | "FULL_BODY"
+  | "HALF_BODY"
+  | "CLOSE_UP";
 
 export type DecorationDensity = "none" | "low" | "normal" | "high";
 
-export type PackPresetId = "daily" | "love" | "funny" | "work" | "custom";
+/** Spec §31 adds "Cute Pack" and "Travel Pack" to Phase 2's original 4
+ * (daily/love/funny/work) + custom. */
+export type PackPresetId = "daily" | "love" | "funny" | "work" | "cute" | "travel" | "custom";
 
 // ----------------------------------------------------------------------------
 // AI Expression & Pose Engine (Phase 2.5). Everything below is additive on
@@ -252,6 +384,14 @@ export interface StickerPlanItem {
    * first built, but independently editable afterwards. */
   expression?: ExpressionId;
   pose?: PoseId;
+  /** Phase 3.1 — per-item overrides of the pack's typography/color/
+   * decoration/text-placement choices. Only meaningful when the pack isn't
+   * locked (StickerPack.fontLocked / styleLocked) or when Manual Design mode
+   * is on; ignored (falls back to the pack-level resolved value) otherwise. */
+  fontStyleOverride?: FontStyleId;
+  colorThemeOverride?: ColorThemeId;
+  decorationCategoryOverride?: DecorationCategoryId;
+  textCompositionOverride?: TextCompositionVariant;
 }
 
 export type PackStickerStatus = "pending" | "generating" | "ready" | "needs_fix" | "error" | "needs_ai";
@@ -345,8 +485,28 @@ export interface StickerPack {
   stickers: PackStickerItem[];
   /** Phase 2.5 §24 — "[✓] Use AI Expressions" toggle. Default OFF: Phase 2's
    * Character Master + Composition/Text/Decoration variation is always a
-   * fully-working fallback that never needs AI at all. */
+   * fully-working fallback that never needs AI at all. Phase 3.1 extends its
+   * meaning: when `style` is not "real", this same toggle also gates AI Art
+   * Style transformation (spec §3 Mode B) — see transformToCartoon() in
+   * lib/expression-pipeline.ts. */
   useAiExpressions: boolean;
+  /** Phase 3.1 §23/§30 — pack-level typography/color/decoration choices.
+   * "auto" resolves per-sticker from that sticker's Emotion (+ Style for
+   * color); an explicit value is used for every sticker unless overridden
+   * (spec §22/§23 "Style Lock"/"Font Lock" — locked by default, see below). */
+  fontStyle: FontStyleId;
+  colorTheme: ColorThemeId;
+  decorationCategory: DecorationCategoryId;
+  /** Spec §24/§25 — Auto Design picks Style/Font/Color/Decoration/Composition
+   * consistently for the whole pack; Manual Design lets the user override
+   * fields per plan item. Auto is the default (spec §24: opened first). */
+  designMode: "auto" | "manual";
+  /** Spec §22 — "ห้ามแต่ละ Sticker ดูเหมือนคนละ Style": when true (default),
+   * every sticker uses the pack's own `style`, ignoring any
+   * `StickerPlanItem.styleOverride`. */
+  styleLocked: boolean;
+  /** Spec §23 — same idea for `fontStyle`. */
+  fontLocked: boolean;
   createdAt: string;
   updatedAt: string;
 }

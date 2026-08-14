@@ -3,8 +3,11 @@ import type {
   CharacterMaster,
   CharacterMode,
   CharacterSource,
+  ColorThemeId,
+  DecorationCategoryId,
   ExpressionGenerationMetadata,
   ExpressionId,
+  FontStyleId,
   PackStickerItem,
   PoseId,
   StickerPlanItem,
@@ -20,9 +23,32 @@ import { DEFAULT_EXPORT_PROFILE, type ExportProfile } from "@/config/export-prof
 import type { DecorationOverrides } from "@/engines/decoration-engine";
 import { generateCharacterExpression } from "./expression-pipeline";
 import { runWithConcurrencyLimit, DEFAULT_AI_CONCURRENCY } from "./concurrency";
+import { FONT_CATALOG } from "@/config/font-catalog";
+import { resolveFontStyle } from "@/config/font-emotion-matching";
+import { resolveColorTheme, resolveThemeColors } from "@/config/color-themes";
+import { resolveDecorationCategory, resolveDecorationGlyphs } from "@/config/decoration-categories";
+import { resolveTextComposition } from "@/config/text-composition-presets";
+import { resolveOutlineWidthPx } from "./outline-scaling";
 
 export function packStickerFilename(order: number): string {
   return `sticker_${String(order).padStart(2, "0")}.png`;
+}
+
+/**
+ * Phase 3.1 §22/§23/§24/§30 — the pack-level typography/color/decoration
+ * bundle every render function below can optionally take. Deliberately
+ * OPTIONAL with no default value (not even an "auto" bundle) everywhere it's
+ * threaded through: when a caller omits it, every function in this file
+ * renders EXACTLY as it did in Phase 1/2/3 — same fonts, same colors, same
+ * decoration pool, same outline width. Only `PackGeneratorApp` (Phase 3.1's
+ * new UI) actually constructs and passes one; every other/older call site
+ * (including this file's own `generatePackStickers`, which the single-
+ * sticker flow's tests never touch) is untouched (spec §1 "ห้ามรื้อระบบเดิม").
+ */
+export interface PackDesignBundle {
+  fontStyle: FontStyleId;
+  colorTheme: ColorThemeId;
+  decorationCategory: DecorationCategoryId;
 }
 
 /**
@@ -41,7 +67,9 @@ export function buildProjectForPlanItem(
    * source (an AI-generated expression, or an explicit fallback) instead of
    * `master` directly. Omitted by every Phase 2 call site, so pack rendering
    * with AI Expressions off is byte-for-byte unchanged. */
-  characterSource?: CharacterSource
+  characterSource?: CharacterSource,
+  /** Phase 3.1 §22/§23/§30 — see PackDesignBundle's own doc comment. */
+  packDesign?: PackDesignBundle
 ): StickerProject {
   const style = planItem.styleOverride ?? packStyle;
   const preset = COMPOSITION_PRESETS[planItem.compositionPresetId];
@@ -65,6 +93,44 @@ export function buildProjectForPlanItem(
   text.fontSizePx = Math.round(text.fontSizePx * preset.textSizeMultiplier);
   text.rotation = preset.rotation;
 
+  // Phase 3.1 §9-§14 — Typography category + Color theme + trendy text
+  // placement, only applied when the caller actually opted in by passing a
+  // `packDesign` bundle (PackGeneratorApp does, once wired — see
+  // components/sticker-pack/PackGeneratorApp.tsx). Every other/older caller
+  // renders with the Style preset's own font/color exactly as before.
+  if (packDesign) {
+    const fontStyle = resolveFontStyle(planItem.emotion, packDesign.fontStyle, planItem.fontStyleOverride);
+    const fontEntry = FONT_CATALOG[fontStyle];
+    text.fontFamily = fontEntry.fontFamily;
+    text.fontWeight = fontEntry.fontWeight;
+
+    const colorTheme = resolveColorTheme(planItem.emotion, style, packDesign.colorTheme, planItem.colorThemeOverride);
+    const { color, outlineColor } = resolveThemeColors(colorTheme, planItem.order);
+    text.color = color;
+    text.outlineColor = outlineColor;
+
+    const composition = resolveTextComposition(planItem.emotion, planItem.order, planItem.textCompositionOverride);
+    text.textComposition = composition;
+    // Style-driven text effects (spec §13) — a light heuristic, not a full
+    // per-style effect config: bold/graphic styles get a hard offset shadow
+    // ("pop" look), soft/cute styles get a gentle glow.
+    text.offsetShadow = style === "comic" || style === "funny";
+    text.glow = style === "kawaii" || style === "chibi" || style === "cartoon";
+  }
+
+  // Phase 3.1 §27 — outline thickness stays visually proportionate to the
+  // character's actual rendered size: `preset.characterScaleMultiplier` is
+  // the exact same factor the character itself was just scaled by above, so
+  // scaling the outline width by it keeps the ring's thickness-to-character
+  // ratio constant across FULL_BODY/HALF_BODY/CLOSE_UP and every other
+  // composition preset, instead of a flat px value that would look
+  // proportionally thicker on a shrunk character and thinner on a
+  // zoomed-in one.
+  const outline = {
+    ...stylePreset.outline,
+    widthPx: resolveOutlineWidthPx(stylePreset.outline.widthPx, preset.characterScaleMultiplier),
+  };
+
   return {
     id: nextId("pack-project"),
     style,
@@ -72,14 +138,38 @@ export function buildProjectForPlanItem(
     character,
     text,
     decorations: [],
-    outline: { ...stylePreset.outline },
+    outline,
     canvasSize,
+    ...(packDesign
+      ? {
+          fontStyle: resolveFontStyle(planItem.emotion, packDesign.fontStyle, planItem.fontStyleOverride),
+          colorTheme: resolveColorTheme(planItem.emotion, style, packDesign.colorTheme, planItem.colorThemeOverride),
+          decorationCategory: resolveDecorationCategory(planItem.emotion, packDesign.decorationCategory, planItem.decorationCategoryOverride),
+        }
+      : {}),
   };
 }
 
-/** Resolves the plan item's decoration density + the richer per-emotion
- * glyph palette (spec §12) into the options generateDecorations() accepts. */
-export function decorationOverridesForPlanItem(planItem: StickerPlanItem): DecorationOverrides {
+/** Resolves the plan item's decoration density + glyph palette (spec §12)
+ * into the options generateDecorations() accepts. Phase 3.1 §16/§17: when a
+ * `packDesign` bundle + `style` are supplied, resolves the Decoration
+ * Category (spec §16) and biases its glyph pool toward the Style's own
+ * "feel" (resolveDecorationGlyphs). Omitted (as every pre-Phase-3.1 caller
+ * does), this is byte-identical to the original Phase 2 per-emotion-only
+ * palette (EMOTION_DECORATION_GLYPHS). */
+export function decorationOverridesForPlanItem(
+  planItem: StickerPlanItem,
+  style?: StyleId,
+  packDesign?: PackDesignBundle
+): DecorationOverrides {
+  if (style && packDesign) {
+    const category = resolveDecorationCategory(planItem.emotion, packDesign.decorationCategory, planItem.decorationCategoryOverride);
+    const emotionGlyph = EMOTION_DECORATION_GLYPHS[planItem.emotion]?.[0] ?? null;
+    return {
+      maxCount: DECORATION_DENSITY_COUNT[planItem.decorationDensity],
+      glyphPool: resolveDecorationGlyphs(category, style, emotionGlyph),
+    };
+  }
   return {
     maxCount: DECORATION_DENSITY_COUNT[planItem.decorationDensity],
     glyphPool: EMOTION_DECORATION_GLYPHS[planItem.emotion],
@@ -100,10 +190,11 @@ export async function renderPackSticker(
   packStyle: StyleId,
   canvasSize: { width: number; height: number } = CANVAS_SIZE,
   profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
-  characterSource?: CharacterSource
+  characterSource?: CharacterSource,
+  packDesign?: PackDesignBundle
 ): Promise<GenerationOutcome> {
-  const project = buildProjectForPlanItem(master, planItem, packStyle, canvasSize, characterSource);
-  return runGenerationPipeline(project, profile, decorationOverridesForPlanItem(planItem));
+  const project = buildProjectForPlanItem(master, planItem, packStyle, canvasSize, characterSource, packDesign);
+  return runGenerationPipeline(project, profile, decorationOverridesForPlanItem(planItem, packStyle, packDesign));
 }
 
 export interface AiRenderInfo {
@@ -141,19 +232,33 @@ export function toPackStickerItem(
 }
 
 /**
- * renderPackStickerWithAI (spec §16/§32) — the AI-aware entry point both
- * batch generation and single-sticker Regenerate use. When `useAiExpressions`
- * is off, or the plan item has no {expression, pose} set, this is IDENTICAL
- * to calling `renderPackSticker` directly (spec §1: Phase 2 behavior
- * unchanged). When on, it first calls the shared `generateCharacterExpression`
- * engine, then renders using whatever character source that produced
- * (AI result, or the original Character Master on failure — spec §17).
+ * renderPackStickerWithAI (spec §16/§32, extended Phase 3.1 §3/§37) — the
+ * AI-aware entry point both batch generation and single-sticker Regenerate
+ * use. When `useAiExpressions` is off, or the plan item has no
+ * {expression, pose} set, this is IDENTICAL to calling `renderPackSticker`
+ * directly (spec §1: Phase 2 behavior unchanged). When on, it first calls
+ * the shared `generateCharacterExpression` engine, then renders using
+ * whatever character source that produced (AI result, or the original
+ * Character Master on failure — spec §17/§19).
+ *
+ * Phase 3.1: this single toggle+call also covers Mode B's "AI Cartoon
+ * Transformation" — `packStyle`/`planItem.styleOverride` was already being
+ * threaded into `generateCharacterExpression` before Phase 3.1 (for the
+ * prompt's "render in a ${style} sticker illustration style" line); Phase
+ * 3.1 just made that style directive stronger for the 4 new art-transform
+ * styles (styles/style-presets.ts's `promptDirective`). See
+ * `transformToCartoon()` in expression-pipeline.ts for why this isn't a
+ * second, separate AI call. For `style === "real"` (Mode A), the prompt
+ * carries no transformation directive, so this still behaves like Phase
+ * 2.5's plain expression/pose engine.
  */
 /** Rough shot-framing hint from a composition preset (spec §12/§13 "Full/
  * half body based on composition") — not an exact science, just enough to
  * bias the prompt sensibly without threading a full composition system
  * through the AI call. */
 function compositionToShotHint(presetId: StickerPlanItem["compositionPresetId"]): "full-body" | "half-body" | "auto" {
+  if (presetId === "FULL_BODY") return "full-body";
+  if (presetId === "HALF_BODY" || presetId === "CLOSE_UP") return "half-body";
   if (presetId === "BIG_CHARACTER_TOP_TEXT" || presetId === "COMIC_BURST") return "full-body";
   if (presetId === "SMALL_CHARACTER_BIG_TEXT" || presetId === "MINIMAL") return "half-body";
   return "auto";
@@ -167,10 +272,11 @@ export async function renderPackStickerWithAI(
   providerName: string,
   canvasSize: { width: number; height: number } = CANVAS_SIZE,
   profile: ExportProfile = DEFAULT_EXPORT_PROFILE,
-  aiOptions: { model?: string; forceFresh?: boolean } = {}
+  aiOptions: { model?: string; forceFresh?: boolean } = {},
+  packDesign?: PackDesignBundle
 ): Promise<{ outcome: GenerationOutcome; ai?: AiRenderInfo }> {
   if (!useAiExpressions || !planItem.expression || !planItem.pose) {
-    const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile);
+    const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile, undefined, packDesign);
     return { outcome };
   }
 
@@ -182,7 +288,7 @@ export async function renderPackStickerWithAI(
     providerName,
     { model: aiOptions.model, forceFresh: aiOptions.forceFresh, composition: compositionToShotHint(planItem.compositionPresetId) }
   );
-  const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile, expr.source);
+  const outcome = await renderPackSticker(master, planItem, packStyle, canvasSize, profile, expr.source, packDesign);
   return {
     outcome,
     ai: {
@@ -205,14 +311,15 @@ export async function generatePackStickers(
   master: CharacterMaster,
   plan: StickerPlanItem[],
   packStyle: StyleId,
-  onProgress?: (done: number, total: number, stage: string) => void
+  onProgress?: (done: number, total: number, stage: string) => void,
+  packDesign?: PackDesignBundle
 ): Promise<PackStickerItem[]> {
   const items: PackStickerItem[] = [];
   for (let i = 0; i < plan.length; i++) {
     const planItem = plan[i];
     onProgress?.(i, plan.length, `กำลังสร้างสติ๊กเกอร์ #${planItem.order}`);
     try {
-      const outcome = await renderPackSticker(master, planItem, packStyle);
+      const outcome = await renderPackSticker(master, planItem, packStyle, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, undefined, packDesign);
       items.push(toPackStickerItem(planItem, outcome));
     } catch (err) {
       console.error(`[pack-pipeline] sticker #${planItem.order} failed:`, err);
@@ -256,7 +363,8 @@ export async function generatePackStickersWithAI(
     current?: { text: string; expression?: ExpressionId; pose?: PoseId },
     perItem?: { order: number; result: "success" | "failed" }
   ) => void,
-  aiModel?: string
+  aiModel?: string,
+  packDesign?: PackDesignBundle
 ): Promise<PackStickerItem[]> {
   // Non-AI path: byte-identical to the original Phase 2 sequential loop.
   // Left completely untouched so `useAiExpressions === false` never changes
@@ -271,9 +379,17 @@ export async function generatePackStickersWithAI(
         pose: planItem.pose,
       });
       try {
-        const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, {
-          model: aiModel,
-        });
+        const { outcome, ai } = await renderPackStickerWithAI(
+          master,
+          planItem,
+          packStyle,
+          useAiExpressions,
+          providerName,
+          CANVAS_SIZE,
+          DEFAULT_EXPORT_PROFILE,
+          { model: aiModel },
+          packDesign
+        );
         items.push(toPackStickerItem(planItem, outcome, ai));
         onProgress?.(i + 1, plan.length, `เสร็จแล้ว ${i + 1}/${plan.length}`, undefined, {
           order: planItem.order,
@@ -314,9 +430,17 @@ export async function generatePackStickersWithAI(
     let item: PackStickerItem;
     let result: "success" | "failed";
     try {
-      const { outcome, ai } = await renderPackStickerWithAI(master, planItem, packStyle, useAiExpressions, providerName, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, {
-        model: aiModel,
-      });
+      const { outcome, ai } = await renderPackStickerWithAI(
+        master,
+        planItem,
+        packStyle,
+        useAiExpressions,
+        providerName,
+        CANVAS_SIZE,
+        DEFAULT_EXPORT_PROFILE,
+        { model: aiModel },
+        packDesign
+      );
       item = toPackStickerItem(planItem, outcome, ai);
       result = ai?.aiStatus === "AI_FAILED" ? "failed" : "success";
     } catch (err) {
@@ -353,9 +477,10 @@ export async function regeneratePackSticker(
   master: CharacterMaster,
   planItem: StickerPlanItem,
   packStyle: StyleId,
-  previous: PackStickerItem
+  previous: PackStickerItem,
+  packDesign?: PackDesignBundle
 ): Promise<PackStickerItem> {
-  const outcome = await renderPackSticker(master, planItem, packStyle);
+  const outcome = await renderPackSticker(master, planItem, packStyle, CANVAS_SIZE, DEFAULT_EXPORT_PROFILE, undefined, packDesign);
   return {
     ...toPackStickerItem(planItem, outcome),
     id: previous.id,
@@ -381,7 +506,8 @@ export async function regeneratePackStickerWithAI(
   useAiExpressions: boolean,
   providerName: string,
   previous: PackStickerItem,
-  aiModel?: string
+  aiModel?: string,
+  packDesign?: PackDesignBundle
 ): Promise<PackStickerItem> {
   const { outcome, ai } = await renderPackStickerWithAI(
     master,
@@ -391,7 +517,8 @@ export async function regeneratePackStickerWithAI(
     providerName,
     CANVAS_SIZE,
     DEFAULT_EXPORT_PROFILE,
-    { model: aiModel, forceFresh: true }
+    { model: aiModel, forceFresh: true },
+    packDesign
   );
   return {
     ...toPackStickerItem(planItem, outcome, ai),

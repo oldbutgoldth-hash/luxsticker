@@ -374,3 +374,116 @@ Same method as Phase 2.5's TEST 08, re-run after adding the new
   (5-10 real examples, Face/Hair/Clothing/Identity consistency observations,
   an 8-sticker real test pack) — none of this is executable from this
   sandbox, and nothing here claims otherwise.
+
+---
+
+# Phase 3.1 — Cartoon Sticker + Style System + Trendy Typography
+
+Manual test plan covering **Phase 3.1**: 6 Character Art Styles (Real Photo/
+Cartoon/Kawaii/Chibi/Comic/Hand Drawn), a Typography category system (8
+font categories + Emotion matching), a Decoration category system (8
+categories + style-flavored glyph bias), a Color Theme system, Style/Font
+Lock, Auto/Manual Design, an expanded Preset system with custom "Save My
+Style", and outline thickness that scales relative to character size. Spec
+§40 requires 20 test cases — all 20 below.
+
+Same honesty constraint as Phase 3: this sandbox's outbound network is still
+restricted to `registry.npmjs.org` (re-confirmed, unchanged since Task 47 in
+the previous phase). Every test here about *logic* — prompt construction,
+resolver precedence, Thai text-cluster safety, outline scaling — is
+independently re-implemented in Node and marked **Yes**. No test claims a
+live AI Cartoon Transformation call was actually observed.
+
+| # | Case | Steps | Expected | Sandbox-verified |
+|---|------|-------|----------|-------------------|
+| 01 | Real Photo Style | Generate with `style: "real"` | `isRealPhotoStyle("real") === true`; the AI prompt never includes an art-transformation directive — Mode A stays pure background-removal (+ optional AI expression/pose only) | **Yes** — `/tmp/verify-phase-3.1.mjs` TEST 01 |
+| 02 | Cartoon Style | Generate with `style: "cartoon"`, AI on | Prompt includes `STYLE_PRESETS.cartoon.promptDirective` ("clean modern cartoon illustration...") plus the extra identity-reinforcement sentence for art-transform styles | **Yes** — TEST 02-06 |
+| 03 | Kawaii Style | Same, `style: "kawaii"` | Prompt includes the kawaii promptDirective + identity reinforcement | **Yes** — TEST 02-06 |
+| 04 | Chibi Style | Same, `style: "chibi"` | Prompt includes the chibi promptDirective + identity reinforcement | **Yes** — TEST 02-06 |
+| 05 | Comic Style | Same, `style: "comic"` | Prompt includes the comic promptDirective + identity reinforcement | **Yes** — TEST 02-06 |
+| 06 | Hand Drawn Style | Same, `style: "hand_drawn"` | Prompt includes the hand-drawn promptDirective + identity reinforcement | **Yes** — TEST 02-06 |
+| 07 | Font Category | Read `FONT_CATALOG`/`FONT_STYLE_ORDER` | Exactly 8 categories (kawaii/cute/comic/handwritten/bold/brush/minimal/luxury), each resolving through a `var(--font-*)` CSS variable (never a hardcoded family name); `resolveFontStyle(..., "auto")` never returns `"auto"` itself | **Yes** — TEST 07 |
+| 08 | Thai Text | Curved-text layout on a word with a tone mark + vowel sign (e.g. "กิ่ง") | Combining marks (สระ/วรรณยุกต์) stay glued to their base consonant as one glyph cluster along the arc — never rendered as a separately-positioned floating mark | **Yes** — TEST 08. **This caught a real bug during this session**: the initial curved-text implementation split by raw `Array.from(line)` (one Canvas draw call per UTF-16 codepoint), which would have visually detached Thai tone marks/vowel signs from their base character on any curved sticker. Fixed by adding `splitGraphemeClusters()` (Unicode `\p{Mn}` combining-mark detection) in `engines/text-engine/index.ts` before this session's TESTING.md was written — not glossed over |
+| 09 | Long Thai Text | Curved layout with a long Thai sentence | The bow angle is clamped (`Math.PI * 0.7` max) regardless of text length — never wraps the text past ~126° of a circle into an unreadable loop | **Yes** — TEST 09 |
+| 10 | Font + Emotion Matching | `resolveFontStyle(emotion, "auto")` for the 7 emotions spec §12 gives explicit examples for | Exact match: สวัสดี→kawaii, ขอบคุณ→handwritten, 555→comic, สู้ๆ→bold, โกรธแล้วนะ→brush, รักนะ→handwritten, ฝันดี→cute | **Yes** — TEST 10 |
+| 11 | Decoration Matching | `resolveDecorationCategory`/`resolveDecorationGlyphs` for various emotion+style combos | Emotion resolves to the right category (cry→sad, hungry→hungry); an explicit pack category always overrides the emotion-derived guess; a Style's signature glyphs (e.g. kawaii's ✨💕⭐) get promoted to the front of whichever category pool is in use | **Yes** — TEST 11 |
+| 12 | Style Lock | Inspect a freshly-created pack (`newPack()`) | `styleLocked: true` by default (spec §22) | **Yes** — TEST 12/13 |
+| 13 | Font Lock | Same | `fontLocked: true` by default (spec §23) | **Yes** — TEST 12/13 |
+| 14 | Auto Design | New pack's `designMode` + resolve every "auto" field | `designMode: "auto"` by default; `resolveFontStyle`/`resolveDecorationCategory` with `"auto"` pack values always return a concrete, non-"auto" result — never left unresolved at render time | **Yes** — TEST 14 |
+| 15 | Manual Design | Call the same resolvers with an explicit per-item override set | The item-level override (`fontStyleOverride`/`decorationCategoryOverride`) always wins over both the pack value and "auto" | **Yes** — TEST 15 |
+| 16 | Custom Preset | `saveCustomPreset()` → `loadCustomPresets()` → `deleteCustomPreset()` | Round-trips exactly (bundle fields preserved); deleted preset no longer appears in the list | **Yes** — TEST 16 (localStorage simulated with an in-memory Map, since this sandbox has no `window`; `lib/custom-presets.ts` itself guards every call with `typeof window === "undefined"`) |
+| 17 | Cartoon AI Failure | Force the provider to throw while `style` is `cartoon`/`chibi`/`comic` | `generateCharacterExpression`'s catch path (Phase 3, re-verified here per-style) always returns `aiStatus: "AI_FAILED"`, `characterMode: "original_character"` — the style being transformed doesn't change the failure contract | **Yes** — TEST 17 |
+| 18 | Fallback | Render the AI failure banner's fallback button for a `cartoon`-style sticker vs. a `real`-style sticker | Non-"real" style shows "📷 Use Real Photo"; "real" style shows the more generic "Use Original Character" — neither is ever labeled as a successful AI result (spec §38/§39) | **Yes** — TEST 18 |
+| 19 | White Outline | `OUTLINE_THICKNESS_LEVELS` + `resolveOutlineWidthPx(base, characterScaleMultiplier)` across FULL_BODY(0.82)/HALF_BODY(1)/CLOSE_UP(1.3) | Levels are exactly `[4, 6, 8, 10, 12]`; width scales proportionally with the character's actual render scale (thinner for a shrunk FULL_BODY shot, thicker for a zoomed CLOSE_UP shot), clamped to `[3, 48]` px so it never disappears or becomes absurd | **Yes** — TEST 19 |
+| 20 | Full Sticker Pipeline | One synthetic `buildProjectForPlanItem`-equivalent call with `emotion: "sawadee"`, `style: "kawaii"`, all pack fields `"auto"` | Font resolves to kawaii, Color Theme resolves to pink, decoration category resolves per-emotion, outline width scales correctly — all from ONE function call, matching how `lib/pack-pipeline.ts`'s real `buildProjectForPlanItem` composes these systems together | **Yes** — TEST 20 |
+
+## A note on Reference Images
+
+The Phase 3.1 spec referenced "Reference Images" as visual direction, but no
+images were actually attached to the request in this session (checked the
+uploads folder — empty). Everything above was built from the spec's very
+detailed text description alone (style names, font categories, decoration
+categories, emotion examples, etc.), which was specific enough to implement
+against directly. This is stated plainly here rather than silently proceeding
+as though reference images had been reviewed.
+
+## Scope decisions made honestly, not silently
+
+- **`transformToCartoon()` reuses the existing AI Expression engine** rather
+  than being a second, parallel AI call — see the doc comment on
+  `transformToCartoon()` in `lib/expression-pipeline.ts`. Style, expression,
+  and pose are all threaded into ONE prompt/one API call per sticker, not
+  three, both for cost (spec's own cost-control sections elsewhere ask for
+  exactly this kind of consolidation) and to avoid identity drift between
+  separate calls.
+- **Decoration categories are still emoji glyphs** drawn via the existing
+  Phase 1 canvas decoration engine, not a new hand-drawn vector icon set per
+  style (spec §17's "should look different per style" is satisfied by
+  biasing which glyphs get used, not by redrawing them) — consistent with
+  the mechanism every prior phase already shipped and tested.
+- **Style preview thumbnails are generated by the picker component itself**
+  (emoji + the style's own real font + swatch color, all pulled from
+  `styles/style-presets.ts`) rather than a rendered PNG thumbnail library —
+  satisfies "self-generated, no copyrighted reference image" (spec §5)
+  without adding a whole thumbnail-rendering pipeline.
+- **The single-sticker flow (`StickerGeneratorApp`) was not wired into the
+  new Typography/Color/Decoration Category systems** — those are pack-level
+  concepts in this implementation (spec §48's walkthrough describes the Pack
+  flow specifically). The single-sticker flow does pick up the 6 Character
+  Art Styles (via the shared `StylePicker`) and defaults to `"real"` for
+  consistency.
+- **`FULL_BODY`/`HALF_BODY`/`CLOSE_UP` were added as new composition preset
+  ids**, but the spec's other named presets (`CHARACTER_LEFT`, `TOP_TEXT`,
+  `CENTER`, etc.) were deliberately NOT added as duplicate aliases — they
+  already map 1:1 onto existing Phase 2 presets (`LEFT_CHARACTER_RIGHT_TEXT`,
+  `CENTER_TOP_TEXT`, `MINIMAL`-ish center placement). Adding redundant ids
+  would fragment the affinity tables without adding real visual variety.
+- **"Brush" font category uses Chonburi**, a bold Thai display font, not a
+  literal calligraphy/brush typeface — no commercially-licensed Thai brush
+  webfont was available to add. Documented plainly in
+  `docs/font-licenses.md`, not presented as something it isn't.
+
+## What was verified in this sandbox (Phase 3.1)
+
+1. `npm run lint`, `tsc --noEmit`, `npm run build` — see Task 74 build report.
+2. All 20 tests above — 64 assertions, all pass (`/tmp/verify-phase-3.1.mjs`).
+3. The Thai curved-text grapheme-cluster bug (Test 08) — found, fixed, and
+   re-verified within this same session, not carried over as a known issue.
+4. `StickerPack`'s new required fields (`fontStyle`/`colorTheme`/
+   `decorationCategory`/`designMode`/`styleLocked`/`fontLocked`) flow
+   correctly through `lib/pack-storage.ts`'s IndexedDB save/load — confirmed
+   by reading that file's `SerializablePack` type (`Omit<StickerPack, ...>`)
+   and save/load functions, which both spread `...pack`/`...serializable`
+   rather than listing fields explicitly, so no migration code was needed.
+
+## What still needs a real browser + real network (Phase 3.1)
+
+- Actually seeing the 6 Style previews, Font category previews, Color Theme
+  swatches, and Decoration category chips rendered in a browser (their
+  *data* was verified, not their pixels).
+- A real click-through of Auto Design vs Manual Design actually changing
+  what gets rendered on real generated stickers.
+- A real live AI Cartoon Transformation call producing a genuinely
+  cartoon-styled image and a human judgment of whether the "same person"
+  requirement actually held — not executable from this sandbox, same
+  constraint as Phase 3, not glossed over here either.

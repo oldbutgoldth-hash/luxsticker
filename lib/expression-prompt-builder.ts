@@ -4,12 +4,19 @@ import { POSE_CATALOG } from "@/config/pose-catalog";
 import { STYLE_PRESETS } from "@/styles/style-presets";
 
 /** English style labels for the prompt (STYLE_PRESETS only has Thai labels,
- * which aren't useful inside an English generation prompt). */
+ * which aren't useful inside an English generation prompt). Phase 3.1 adds
+ * the 4 new Character Art Styles; `real` is unused in practice (Mode A never
+ * calls this — see isRealPhotoStyle() in types/index.ts) but kept for type
+ * completeness. */
 const STYLE_PROMPT_LABEL: Record<StyleId, string> = {
   cute: "cute, soft pastel",
   funny: "bold, comedic, high-contrast",
   kawaii: "kawaii, pastel with a double outline",
   real: "realistic, photo-based",
+  cartoon: "clean modern cartoon",
+  chibi: "chibi, oversized head, small body",
+  comic: "comic book, bold ink outlines",
+  hand_drawn: "hand-drawn doodle",
 };
 
 export interface ExpressionPromptInput {
@@ -27,8 +34,10 @@ export interface ExpressionPromptInput {
  * (not for catalog/label copy edits). Part of the expression cache key
  * (spec Phase 3 §23: "...promptVersion") so a prompt-engineering change
  * can never silently serve a stale image generated under the old wording.
+ * v3 (Phase 3.1): adds each Style's own `promptDirective` art-direction
+ * clause (spec §6/§37 "Character Identity" + "Cartoon Transformation").
  */
-export const PROMPT_VERSION = "v2";
+export const PROMPT_VERSION = "v3";
 
 /**
  * buildExpressionPrompt (spec §12) — the ONE place in the app that turns
@@ -47,11 +56,23 @@ export const PROMPT_VERSION = "v2";
  * AI models routinely render Thai text incorrectly; all sticker text comes
  * from this app's own Canvas Text Engine, always applied AFTER this image
  * comes back, never baked in by the AI).
+ *
+ * Phase 3.1 (spec §6/§7/§37): also folds in the chosen Style's own
+ * `promptDirective` (styles/style-presets.ts) — this is what makes a single
+ * `generateExpression()` call double as `transformToCartoon()` (see
+ * lib/expression-pipeline.ts): the SAME engine already took `style` as an
+ * input, so "transform art style" and "change expression/pose" are just two
+ * directives inside one prompt, not two separate AI calls. Identity
+ * preservation directives stay first and are made stronger for non-photo
+ * styles specifically, since redrawing a whole character (not just
+ * expression) is a bigger transformation and more likely to drift.
  */
 export function buildExpressionPrompt(input: ExpressionPromptInput): string {
   const expression = EXPRESSION_CATALOG[input.emotion];
   const pose = POSE_CATALOG[input.pose];
-  const styleLabel = STYLE_PROMPT_LABEL[input.style] ?? STYLE_PRESETS[input.style]?.labelTh ?? input.style;
+  const stylePreset = STYLE_PRESETS[input.style];
+  const styleLabel = STYLE_PROMPT_LABEL[input.style] ?? stylePreset?.labelTh ?? input.style;
+  const isArtTransformation = input.style !== "real" && Boolean(stylePreset?.promptDirective);
   const shot =
     input.composition === "full-body"
       ? "full-body shot"
@@ -68,6 +89,12 @@ export function buildExpressionPrompt(input: ExpressionPromptInput): string {
     "Preserve clothing exactly.",
     "Preserve accessories exactly.",
     "Preserve overall identity.",
+    ...(isArtTransformation
+      ? [
+          `Transform the character into this art style: ${stylePreset.promptDirective}.`,
+          "Even though the art style changes, this must still be recognizably the same specific person — same face shape, same hairstyle and hair color, same skin tone, same clothing, same accessories, same body type, just redrawn in the new art style.",
+        ]
+      : []),
     `Change only the facial expression to: ${expression.description}.`,
     `Change only the body pose to: ${pose.description}.`,
     `Render in a ${styleLabel} sticker illustration style.`,

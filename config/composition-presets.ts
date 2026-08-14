@@ -123,6 +123,39 @@ export const COMPOSITION_PRESETS: Record<CompositionPresetId, CompositionPresetD
     rotation: 0,
     decorationDensity: "none",
   },
+  // ---- Phase 3.1 §18: shot-framing variety (how much of the character is
+  // visible), distinct from the 10 presets above which vary position/text
+  // size but keep roughly the same "amount of character" on screen. ----
+  FULL_BODY: {
+    id: "FULL_BODY",
+    label: "เต็มตัว",
+    characterXFraction: 0.5,
+    characterYFraction: 0.66,
+    characterScaleMultiplier: 0.82,
+    textSizeMultiplier: 0.95,
+    rotation: 0,
+    decorationDensity: "low",
+  },
+  HALF_BODY: {
+    id: "HALF_BODY",
+    label: "ครึ่งตัว",
+    characterXFraction: 0.5,
+    characterYFraction: 0.56,
+    characterScaleMultiplier: 1,
+    textSizeMultiplier: 1,
+    rotation: 0,
+    decorationDensity: "normal",
+  },
+  CLOSE_UP: {
+    id: "CLOSE_UP",
+    label: "โคลสอัพ",
+    characterXFraction: 0.5,
+    characterYFraction: 0.5,
+    characterScaleMultiplier: 1.3,
+    textSizeMultiplier: 0.9,
+    rotation: 0,
+    decorationDensity: "low",
+  },
 };
 
 export const COMPOSITION_PRESET_IDS: CompositionPresetId[] = Object.keys(
@@ -145,23 +178,23 @@ export const DECORATION_DENSITY_COUNT: Record<DecorationDensity, number> = {
  * repeated emotions in a big pack still vary (spec §10).
  */
 export const EMOTION_COMPOSITION_AFFINITY: Record<EmotionId, CompositionPresetId[]> = {
-  sawadee: ["LEFT_CHARACTER_RIGHT_TEXT", "CENTER_TOP_TEXT", "RIGHT_CHARACTER_LEFT_TEXT"],
+  sawadee: ["LEFT_CHARACTER_RIGHT_TEXT", "CENTER_TOP_TEXT", "RIGHT_CHARACTER_LEFT_TEXT", "HALF_BODY"],
   thankyou: ["CENTER_BOTTOM_TEXT", "RIGHT_CHARACTER_LEFT_TEXT", "HEART_FRAME"],
   ok: ["MINIMAL", "LEFT_CHARACTER_RIGHT_TEXT", "CENTER_TOP_TEXT"],
-  love: ["HEART_FRAME", "CENTER_BOTTOM_TEXT", "DIAGONAL"],
-  miss: ["HEART_FRAME", "CENTER_TOP_TEXT", "RIGHT_CHARACTER_LEFT_TEXT"],
-  haha: ["COMIC_BURST", "DIAGONAL", "BIG_CHARACTER_TOP_TEXT"],
-  happy: ["BIG_CHARACTER_TOP_TEXT", "COMIC_BURST", "CENTER_TOP_TEXT"],
-  shy: ["SMALL_CHARACTER_BIG_TEXT", "MINIMAL", "HEART_FRAME"],
+  love: ["HEART_FRAME", "CENTER_BOTTOM_TEXT", "DIAGONAL", "CLOSE_UP"],
+  miss: ["HEART_FRAME", "CENTER_TOP_TEXT", "RIGHT_CHARACTER_LEFT_TEXT", "CLOSE_UP"],
+  haha: ["COMIC_BURST", "DIAGONAL", "BIG_CHARACTER_TOP_TEXT", "FULL_BODY"],
+  happy: ["BIG_CHARACTER_TOP_TEXT", "COMIC_BURST", "CENTER_TOP_TEXT", "FULL_BODY"],
+  shy: ["SMALL_CHARACTER_BIG_TEXT", "MINIMAL", "HEART_FRAME", "CLOSE_UP"],
   sulk: ["DIAGONAL", "LEFT_CHARACTER_RIGHT_TEXT", "SMALL_CHARACTER_BIG_TEXT"],
-  angry: ["COMIC_BURST", "DIAGONAL", "BIG_CHARACTER_TOP_TEXT"],
-  cry: ["SMALL_CHARACTER_BIG_TEXT", "CENTER_BOTTOM_TEXT", "MINIMAL"],
+  angry: ["COMIC_BURST", "DIAGONAL", "BIG_CHARACTER_TOP_TEXT", "CLOSE_UP"],
+  cry: ["SMALL_CHARACTER_BIG_TEXT", "CENTER_BOTTOM_TEXT", "MINIMAL", "CLOSE_UP"],
   hungry: ["BIG_CHARACTER_TOP_TEXT", "LEFT_CHARACTER_RIGHT_TEXT", "COMIC_BURST"],
   sleepy: ["MINIMAL", "SMALL_CHARACTER_BIG_TEXT", "CENTER_BOTTOM_TEXT"],
   tired: ["MINIMAL", "SMALL_CHARACTER_BIG_TEXT", "CENTER_BOTTOM_TEXT"],
-  fight: ["BIG_CHARACTER_TOP_TEXT", "COMIC_BURST", "RIGHT_CHARACTER_LEFT_TEXT"],
+  fight: ["BIG_CHARACTER_TOP_TEXT", "COMIC_BURST", "RIGHT_CHARACTER_LEFT_TEXT", "FULL_BODY"],
   goodnight: ["CENTER_BOTTOM_TEXT", "MINIMAL", "HEART_FRAME"],
-  custom: ["CENTER_TOP_TEXT", "LEFT_CHARACTER_RIGHT_TEXT", "RIGHT_CHARACTER_LEFT_TEXT", "CENTER_BOTTOM_TEXT"],
+  custom: ["CENTER_TOP_TEXT", "LEFT_CHARACTER_RIGHT_TEXT", "RIGHT_CHARACTER_LEFT_TEXT", "CENTER_BOTTOM_TEXT", "HALF_BODY"],
 };
 
 /**

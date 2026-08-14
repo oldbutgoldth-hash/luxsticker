@@ -2,6 +2,9 @@
 
 import { useEffect, useRef } from "react";
 import type { PackStickerItem } from "@/types";
+import { STYLE_PRESETS } from "@/styles/style-presets";
+import { FONT_CATALOG } from "@/config/font-catalog";
+import { COLOR_THEMES } from "@/config/color-themes";
 
 function CardPreview({ canvas }: { canvas: HTMLCanvasElement | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -54,6 +57,30 @@ function aiBadgeFor(sticker: PackStickerItem): { label: string; className: strin
   return { label: "⚠ AI FAILED", className: "bg-red-100 text-red-600" };
 }
 
+/** Phase 3.1 §36 — "Style Badge / Font Badge / Color Theme" shown per card
+ * in the Pack Dashboard, straight from what actually got rendered onto that
+ * sticker's own StickerProject (not the pack's nominal settings) — so a
+ * per-item override or a resolved "auto" value shows the truth for THIS
+ * sticker, not just a copy of the pack-level choice. Only rendered when a
+ * project exists (a pack generated before Phase 3.1, or one that never used
+ * these fields, silently shows nothing extra — no fabricated badge). */
+function designBadges(sticker: PackStickerItem): string[] {
+  const project = sticker.project;
+  if (!project) return [];
+  const badges: string[] = [];
+  const stylePreset = STYLE_PRESETS[project.style];
+  if (stylePreset) badges.push(stylePreset.labelTh.toUpperCase());
+  if (project.fontStyle && project.fontStyle !== "auto") {
+    const fontEntry = FONT_CATALOG[project.fontStyle];
+    if (fontEntry) badges.push(`${fontEntry.labelTh.toUpperCase()} FONT`);
+  }
+  if (project.colorTheme && project.colorTheme !== "auto") {
+    const theme = COLOR_THEMES[project.colorTheme];
+    if (theme) badges.push(theme.labelTh.toUpperCase());
+  }
+  return badges;
+}
+
 interface Props {
   stickers: PackStickerItem[];
   onSelect: (sticker: PackStickerItem) => void;
@@ -70,6 +97,7 @@ export default function PackDashboardGrid({ stickers, onSelect }: Props) {
         .map((sticker) => {
           const badge = STATUS_BADGE[sticker.status];
           const aiBadge = aiBadgeFor(sticker);
+          const designBadgeLabels = designBadges(sticker);
           return (
             <button
               key={sticker.id}
@@ -90,6 +118,11 @@ export default function PackDashboardGrid({ stickers, onSelect }: Props) {
                   {aiBadge && (
                     <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${aiBadge.className}`}>{aiBadge.label}</span>
                   )}
+                  {designBadgeLabels.map((label) => (
+                    <span key={label} className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-[9px] font-bold text-slate-500">
+                      {label}
+                    </span>
+                  ))}
                 </div>
               </div>
             </button>

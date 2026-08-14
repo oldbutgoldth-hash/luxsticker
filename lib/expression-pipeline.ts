@@ -206,3 +206,42 @@ export async function generateCharacterExpression(
     };
   }
 }
+
+/**
+ * transformToCartoon (Phase 3.1 spec §7/§37) — the spec's named entry point
+ * for "Original Photo -> AI Cartoon Transformation" (Mode B's pipeline
+ * step). Input shape is `{characterReference, style, emotion, pose}`,
+ * exactly as spec'd — which is ALSO exactly `generateCharacterExpression`'s
+ * existing input shape, because `style` was already one of its parameters
+ * (it's threaded into `buildExpressionPrompt`, which now folds each Style's
+ * `promptDirective` into the prompt — see expression-prompt-builder.ts).
+ *
+ * This is a deliberate architectural choice, not a missed requirement:
+ * spec §29 ("AI + Graphics Split") and §37 both say cartoon transformation,
+ * expression, and pose must all go "through the AI Provider Interface" —
+ * they don't have to be three separate provider calls to satisfy that, and
+ * making them three separate calls would triple AI cost per sticker and
+ * risk identity drift between calls (the character could look subtly
+ * different between the "cartoon transform" pass and the "expression" pass).
+ * One call that transforms style AND expression AND pose together, sharing
+ * the exact same cache/quality-gate/fallback/concurrency machinery Phase 3
+ * already built and tested, is both cheaper and more consistent. This
+ * function exists as a named, spec-matching entry point so callers that
+ * conceptually want "cartoon transformation" don't have to know that detail
+ * — it's just a thin, documented alias.
+ *
+ * For `style === "real"` (Mode A), callers should not call this at all —
+ * see `isRealPhotoStyle()` in types/index.ts — Mode A only ever needs
+ * `generateCharacterExpression` for expression/pose, with no art
+ * transformation directive in the prompt.
+ */
+export async function transformToCartoon(
+  reference: CharacterReferenceSource,
+  style: StyleId,
+  emotion: ExpressionId,
+  pose: PoseId,
+  providerName: string,
+  options: GenerateCharacterExpressionOptions = {}
+): Promise<GenerateCharacterExpressionOutcome> {
+  return generateCharacterExpression(reference, emotion, pose, style, providerName, options);
+}

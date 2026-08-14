@@ -9,6 +9,12 @@
   --font-kanit: "Kanit", "Noto Sans Thai", sans-serif;
   --font-mitr: "Mitr", "Noto Sans Thai", sans-serif;
   --font-prompt: "Prompt", "Noto Sans Thai", sans-serif;
+  /* Phase 3.1 — Typography category system (config/font-catalog.ts). Same
+     runtime <link> loading approach as the 3 fonts above (lib/fonts.ts). */
+  --font-mali: "Mali", "Noto Sans Thai", sans-serif;
+  --font-charmonman: "Charmonman", "Noto Sans Thai", cursive;
+  --font-chonburi: "Chonburi", "Noto Sans Thai", sans-serif;
+  --font-taviraj: "Taviraj", "Noto Serif Thai", serif;
 }
 
 @theme inline {

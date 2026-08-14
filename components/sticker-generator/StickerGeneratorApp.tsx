@@ -25,7 +25,11 @@ type Phase = "upload" | "configure" | "result";
 
 export default function StickerGeneratorApp() {
   const [phase, setPhase] = useState<Phase>("upload");
-  const [style, setStyle] = useState<StyleId>("cute");
+  // Phase 3.1 §30 — "real" is the first of the 6 spec'd Style choices and
+  // the only one that never needs AI, so a fresh single-sticker session is
+  // always immediately generatable with zero setup (same reasoning as the
+  // Pack flow's newPack() default).
+  const [style, setStyle] = useState<StyleId>("real");
   const [emotion, setEmotion] = useState<EmotionId>("sawadee");
   const [customText, setCustomText] = useState("");
 

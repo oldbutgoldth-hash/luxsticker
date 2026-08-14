@@ -13,6 +13,8 @@ const PRESET_EMOJI: Record<PackPresetId, string> = {
   love: "❤️",
   funny: "😂",
   work: "💼",
+  cute: "🧸",
+  travel: "✈️",
   custom: "🎛️",
 };
 

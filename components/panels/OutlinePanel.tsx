@@ -1,6 +1,7 @@
 "use client";
 
 import type { OutlineConfig, OutlineStyle } from "@/types";
+import { OUTLINE_THICKNESS_LEVELS } from "@/lib/outline-scaling";
 
 const OUTLINE_OPTIONS: { id: OutlineStyle; label: string }[] = [
   { id: "white", label: "White" },
@@ -35,6 +36,32 @@ export default function OutlinePanel({ value, onChange }: Props) {
           </button>
         ))}
       </div>
+
+      {/* Phase 3.1 spec §27 — quick-pick the exact 4/6/8/10/12 thickness
+          levels the spec asks for, on top of the existing free slider. In a
+          Pack, this base level then gets scaled per-sticker relative to that
+          sticker's actual composition/shot scale (lib/outline-scaling.ts) so
+          it stays visually proportionate across FULL_BODY/HALF_BODY/CLOSE_UP
+          etc; in the single-sticker editor (no composition presets), this
+          value is used as-is. */}
+      <div className="mt-3 flex items-center gap-1.5">
+        <span className="text-xs font-medium text-slate-500">Thickness</span>
+        {OUTLINE_THICKNESS_LEVELS.map((level) => (
+          <button
+            key={level}
+            type="button"
+            onClick={() => onChange({ ...value, widthPx: level })}
+            className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
+              value.widthPx === level
+                ? "border-pink-500 bg-pink-500 text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+            }`}
+          >
+            {level}
+          </button>
+        ))}
+      </div>
+
       <div className="mt-3 flex items-center gap-3">
         <label className="text-xs font-medium text-slate-500">Width</label>
         <input

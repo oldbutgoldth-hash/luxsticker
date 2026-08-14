@@ -2,9 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { ExpressionId, PackPresetId, PackSize, PackStickerItem, PoseId, StickerPack, StickerProject, StyleId } from "@/types";
+import type {
+  ExpressionId,
+  PackPresetId,
+  PackSize,
+  PackStickerItem,
+  PoseId,
+  StickerPack,
+  StickerProject,
+  StyleId,
+} from "@/types";
 import UploadDropzone from "@/components/upload/UploadDropzone";
 import StylePicker from "@/components/panels/StylePicker";
+import FontStylePicker from "@/components/panels/FontStylePicker";
+import ColorThemePicker from "@/components/panels/ColorThemePicker";
+import DecorationCategoryPicker from "@/components/panels/DecorationCategoryPicker";
 import PackSizePicker from "./PackSizePicker";
 import PackPresetPicker from "./PackPresetPicker";
 import StickerPlanEditor from "./StickerPlanEditor";
@@ -23,6 +35,7 @@ import {
   saveEditedPackSticker,
   renderPackSticker,
   toPackStickerItem,
+  type PackDesignBundle,
 } from "@/lib/pack-pipeline";
 import { validateStickerPack } from "@/lib/pack-validation";
 import { savePackSnapshot, loadPackSnapshot, clearPackStorage } from "@/lib/pack-storage";
@@ -30,6 +43,9 @@ import { exportPackAsZip } from "@/lib/pack-export";
 import { APP_VERSION } from "@/lib/app-version";
 import { resolveClientProviderName, isMockProvider } from "@/providers/ai/registry";
 import { fetchAiStatus, type AiStatus } from "@/lib/ai-status";
+import { PACK_PRESETS } from "@/config/pack-presets";
+import { isRealPhotoStyle } from "@/types";
+import { DEFAULT_EXPORT_PROFILE } from "@/config/export-profiles";
 
 type Step = "upload" | "size" | "preset" | "plan" | "generating" | "dashboard";
 
@@ -50,6 +66,15 @@ function newPack(style: StyleId): StickerPack {
     // Text/Decoration variation already produces a complete pack with zero
     // AI cost, so AI Expressions are an opt-in upgrade, never a requirement.
     useAiExpressions: false,
+    // Phase 3.1 §22-§26/§30 — Auto Design by default, everything resolved
+    // from Emotion/Style unless the user explicitly picks something or
+    // switches to Manual Design; locked by default (spec §22/§23).
+    fontStyle: "auto",
+    colorTheme: "auto",
+    decorationCategory: "auto",
+    designMode: "auto",
+    styleLocked: true,
+    fontLocked: true,
     createdAt: now,
     updatedAt: now,
   };
@@ -134,7 +159,10 @@ export default function PackGeneratorApp() {
     try {
       const outcome = await removeBackgroundAndBuildLayer(file, CANVAS_SIZE);
       const master = await buildCharacterMaster(outcome.layer);
-      const p = newPack("cute");
+      // Phase 3.1 §30: default to "real" (Real Photo) — the first of the 6
+      // spec'd Style choices and the only one that never needs AI, so a
+      // brand-new pack is always immediately generatable with zero setup.
+      const p = newPack("real");
       p.character = master;
       setPack(p);
       setStep("size");
@@ -155,9 +183,41 @@ export default function PackGeneratorApp() {
   const confirmPreset = (presetId: PackPresetId) => {
     if (!pack) return;
     const plan = buildStickerPlan(pack.size, presetId);
-    setPack({ ...pack, presetId, plan, updatedAt: new Date().toISOString() });
+    // Phase 3.1 §31 — picking a built-in preset also seeds its paired
+    // Style/Font/Color/Decoration bundle (config/pack-presets.ts's `design`)
+    // exactly as spec'd ("Cute Pack = Cartoon + Kawaii Font + Pastel +
+    // Heart/Sparkle", etc.). "Custom" has no bundle — leaves whatever the
+    // user already chose on the Size step untouched.
+    const design = presetId === "custom" ? null : PACK_PRESETS[presetId].design;
+    setPack({
+      ...pack,
+      presetId,
+      plan,
+      ...(design
+        ? {
+            style: design.style,
+            fontStyle: design.fontStyle,
+            colorTheme: design.colorTheme,
+            decorationCategory: design.decorationCategory,
+          }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    });
     setStep("plan");
   };
+
+  /** Phase 3.1 — the bundle every render/regenerate call threads through so
+   * Typography/Color/Decoration Category actually take effect (see
+   * PackDesignBundle's doc comment in lib/pack-pipeline.ts for why this is
+   * always explicitly passed rather than defaulted inside the pipeline). */
+  const packDesignBundle = useCallback(
+    (p: StickerPack): PackDesignBundle => ({
+      fontStyle: p.fontStyle,
+      colorTheme: p.colorTheme,
+      decorationCategory: p.decorationCategory,
+    }),
+    []
+  );
 
   const runGeneratePack = useCallback(async () => {
     if (!pack?.character) return;
@@ -177,7 +237,8 @@ export default function PackGeneratorApp() {
           setProgress({ done, total, stage, current });
           if (perItem) setStickerRunLog((prev) => [...prev, perItem]);
         },
-        aiStatus?.model
+        aiStatus?.model,
+        packDesignBundle(pack)
       );
       setPack((prev) => (prev ? { ...prev, stickers, status: "REVIEW", updatedAt: new Date().toISOString() } : prev));
       setStep("dashboard");
@@ -188,7 +249,7 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack, providerName, aiStatus]);
+  }, [pack, providerName, aiStatus, packDesignBundle]);
 
   const updateSticker = (updated: PackStickerItem) => {
     setPack((prev) => (prev ? { ...prev, stickers: prev.stickers.map((s) => (s.id === updated.id ? updated : s)) } : prev));
@@ -224,7 +285,8 @@ export default function PackGeneratorApp() {
         pack.useAiExpressions,
         providerName,
         selectedSticker,
-        aiStatus?.model
+        aiStatus?.model,
+        packDesignBundle(pack)
       );
       updateSticker(updated);
     } catch (e) {
@@ -233,7 +295,7 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack, selectedSticker, providerName, aiStatus]);
+  }, [pack, selectedSticker, providerName, aiStatus, packDesignBundle]);
 
   /** Spec §17/§20 — the "Retry" button on a "needs_ai" sticker's failure
    * banner. Always goes through AI (that's the whole point of retrying),
@@ -252,7 +314,8 @@ export default function PackGeneratorApp() {
         true,
         providerName,
         selectedSticker,
-        aiStatus?.model
+        aiStatus?.model,
+        packDesignBundle(pack)
       );
       updateSticker(updated);
     } catch (e) {
@@ -261,7 +324,7 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack, selectedSticker, providerName, aiStatus]);
+  }, [pack, selectedSticker, providerName, aiStatus, packDesignBundle]);
 
   /** Spec §17 — "Use Original Character": accept the already-rendered
    * fallback instead of retrying. No AI call, no re-render. */
@@ -282,7 +345,15 @@ export default function PackGeneratorApp() {
       nextPlan.splice(insertAt, 0, clone);
       const renumbered = nextPlan.map((p, i) => ({ ...p, order: i + 1 }));
 
-      const outcome = await renderPackSticker(pack.character, clone, pack.style);
+      const outcome = await renderPackSticker(
+        pack.character,
+        clone,
+        pack.style,
+        CANVAS_SIZE,
+        DEFAULT_EXPORT_PROFILE,
+        undefined,
+        packDesignBundle(pack)
+      );
       const newSticker = toPackStickerItem(clone, outcome);
 
       setPack((prev) =>
@@ -295,7 +366,7 @@ export default function PackGeneratorApp() {
     } finally {
       setIsBusy(false);
     }
-  }, [pack, selectedSticker]);
+  }, [pack, selectedSticker, packDesignBundle]);
 
   const handleDelete = useCallback(() => {
     if (!pack || !selectedSticker) return;
@@ -390,9 +461,65 @@ export default function PackGeneratorApp() {
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <StickerPlanEditor plan={pack.plan} onChange={(plan) => setPack({ ...pack, plan })} />
 
+          {/* Phase 3.1 §24/§25 — Auto Design (default) resolves Font/Color/
+              Decoration per sticker from Emotion/Style automatically; Manual
+              Design lets the pickers below act as an explicit pack-wide
+              choice instead (still "auto" per-field unless the user picks
+              something). Style/Font Lock (§22/§23) keep the whole pack
+              visually consistent — locked by default. */}
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-slate-700">Design</h3>
+              <div className="flex overflow-hidden rounded-full border border-slate-300">
+                {(["auto", "manual"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setPack({ ...pack, designMode: mode })}
+                    className={`px-3 py-1 text-xs font-semibold transition-colors ${
+                      pack.designMode === mode ? "bg-pink-500 text-white" : "bg-white text-slate-500 hover:bg-slate-100"
+                    }`}
+                  >
+                    {mode === "auto" ? "Auto Design" : "Manual Design"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <FontStylePicker value={pack.fontStyle} onChange={(fontStyle) => setPack({ ...pack, fontStyle })} />
+            <ColorThemePicker value={pack.colorTheme} onChange={(colorTheme) => setPack({ ...pack, colorTheme })} />
+            <DecorationCategoryPicker
+              value={pack.decorationCategory}
+              onChange={(decorationCategory) => setPack({ ...pack, decorationCategory })}
+            />
+
+            <div className="flex flex-wrap gap-4 pt-1">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={pack.styleLocked}
+                  onChange={(e) => setPack({ ...pack, styleLocked: e.target.checked })}
+                  className="h-3.5 w-3.5"
+                />
+                🔒 Style Lock (สติ๊กเกอร์ทุกภาพใช้ Style เดียวกัน)
+              </label>
+              <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={pack.fontLocked}
+                  onChange={(e) => setPack({ ...pack, fontLocked: e.target.checked })}
+                  className="h-3.5 w-3.5"
+                />
+                🔒 Font Lock (สติ๊กเกอร์ทุกภาพใช้ Font เดียวกัน)
+              </label>
+            </div>
+          </div>
+
           {/* Spec §24 (Phase 2.5) / §33 (Phase 3) — [✓] Use AI Expressions
               toggle, default OFF, disabled outright if AI_MODE=real but no
-              provider/key is configured server-side. */}
+              provider/key is configured server-side. Phase 3.1: this same
+              toggle also gates AI Cartoon Transformation for any non-"real"
+              Style (spec §3 Mode B) — see StylePicker's own "AI" chip note. */}
           <label
             className={`flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700 ${aiUnavailable ? "opacity-50" : ""}`}
           >
@@ -403,12 +530,19 @@ export default function PackGeneratorApp() {
               onChange={(e) => setPack({ ...pack, useAiExpressions: e.target.checked })}
               className="h-4 w-4"
             />
-            ใช้ AI Expressions (ทดลอง) — สร้างสีหน้า/ท่าทางแตกต่างกันต่อภาพด้วย AI
+            ใช้ AI (Expression / Pose{!isRealPhotoStyle(pack.style) ? " / Cartoon Style Transformation" : ""})
           </label>
 
           {aiUnavailable && (
             <p className="rounded-xl bg-red-50 px-3 py-2 text-xs font-bold text-red-600">
               ⚠ AI Provider ยังไม่ได้ตั้งค่า — ผู้ดูแลระบบต้องตั้งค่า AI_PROVIDER และ AI_PROVIDER_API_KEY ก่อนใช้งาน AI Expressions
+            </p>
+          )}
+
+          {!isRealPhotoStyle(pack.style) && !pack.useAiExpressions && !aiUnavailable && (
+            <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+              ⚠ Style ที่เลือก (&quot;{pack.style}&quot;) ต้องเปิด AI ถึงจะแปลงตัวละครเป็นสไตล์นั้นจริง — ถ้าไม่เปิด สติ๊กเกอร์จะยังใช้ภาพต้นฉบับ
+              (Real Photo) แต่ตกแต่ง/ฟอนต์/เส้นขอบตามสไตล์ที่เลือก
             </p>
           )}
 
